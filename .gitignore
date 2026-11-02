@@ -9,3 +9,4 @@ inventory.local.yml
 
 # operator vault (encrypted secrets) — never publish
 inventories/group_vars/all/vault.yml
+.venv-ansible

@@ -1,6 +1,8 @@
-# ffhh-gw-ansible
+# ansible-gateway
 
-Ansible automation for **Freifunk Hamburg (ffhh) mesh gateways**.
+Ansible automation for **Freifunk Hamburg (ffhh) mesh gateways**. This is the
+single development home for the gateway configuration (successor of the
+archived `ffhh-gw-ansible`).
 
 Every gateway managed by this repository is a **Debian 13** host built to the
 same configuration. The existing gateways are not modified by this automation;
@@ -42,10 +44,10 @@ ansible-playbook playbooks/gateway.yml
 
 fastd peer secrets are operator-supplied and kept out of this repo entirely
 (in the private `leo/ffhh-gw-vault` repo, symlinked to
-`inventories/group_vars/all/vault.yml` — git-ignored). Without them the role
+`inventories/group_vars/all/vault.yml` — git-ignored, with `.vault_pass`
+symlinked to the decryption password; see `AGENTS.md`). Without them the role
 renders the configuration but does not start instances; use
-`playbooks/gateway-fastd.yml -e fastd_start=true --ask-vault-pass` for the
-secrets-enabled run.
+`playbooks/gateway-fastd.yml -e fastd_start=true` for the secrets-enabled run.
 
 Optional verification playbooks:
 

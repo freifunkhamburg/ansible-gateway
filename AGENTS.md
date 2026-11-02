@@ -1,6 +1,24 @@
-# AGENTS.md — ffhh-gw-ansible
+# AGENTS.md — ansible-gateway
 
 Project-specific rules. Read before doing anything here.
+
+## 0. This repo is the development home
+
+`ansible-gateway` (Gitea `leo/ansible-gateway`) is the single active repo for
+ffhh gateway automation, replacing `leo/ffhh-gw-ansible` (archived; kept only
+as history reference — never push there).
+
+- History is secret-free **by construction**: secrets live in `leo/ffhh-gw-vault`,
+  never here, not in any commit.
+- Remotes: `origin` = Gitea (default for all pushes); `github` =
+  `freifunkhamburg/ansible-gateway` (public mirror) — push there **only when
+  explicitly asked** (pre-push hook requires `ALLOW_GITHUB_PUSH=1`).
+- Run ansible via `.venv-ansible` (symlink to `/projects/.toolchain/ansible-venv`,
+  ansible-core 2.21).
+- Vault: `inventories/group_vars/all/vault.yml` and `.vault_pass` are operator
+  symlinks (git-ignored) to `../ffhh-gw-vault/vault.yml` and
+  `/projects/.ssh/ffhh_vault_pass`; `ansible.cfg` points at `.vault_pass`, so
+  no `--ask-vault-pass` is needed.
 
 ## 1. Scope
 
@@ -44,6 +62,7 @@ Kea block, Gluon domain) belongs in `region_vars`.
 - Operator secrets (fastd keys) come from an ansible-vault kept in the private
   `leo/ffhh-gw-vault` repo (symlinked to `inventories/group_vars/all/vault.yml`,
   git-ignored); never commit them. This repo must stay secret-free in all history.
+  Never add a GitHub remote to, or push, `ffhh-gw-vault`.
 - The firewall is applied when its rendered ruleset changes. Confirm the SSH
   allowlist contains the control path before applying.
 - BIRD reloads, service restarts and interface renames are expected parts of

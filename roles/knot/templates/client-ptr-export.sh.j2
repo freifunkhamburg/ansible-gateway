@@ -1,0 +1,10 @@
+#!/bin/sh
+# Export the Kea v4 lease DB into a kresd-readable copy.
+# Kea's memfile DB is 0640 root:_kea; kresd runs as {{ knot_user }} and must
+# not be able to write it, so a plain 0644 copy is refreshed by a timer.
+set -eu
+install -d -m 0755 "{{ knot_client_ptr_dir }}"
+if [ -f "{{ knot_client_ptr_source }}" ]; then
+    cp -f "{{ knot_client_ptr_source }}" "{{ knot_client_ptr_leases }}"
+    chmod 0644 "{{ knot_client_ptr_leases }}"
+fi

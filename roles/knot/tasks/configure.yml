@@ -196,3 +196,57 @@
       client PTRs: {{ knot_client_rev.results
                       | map(attribute='stdout') | map('trim') | join(', ') }}
   when: not ansible_check_mode
+
+# --- IPv4 client PTR synthesis (opt-in) --------------------------------
+- name: Install the lease export script
+  ansible.builtin.template:
+    src: client-ptr-export.sh.j2
+    dest: "{{ knot_client_ptr_export }}"
+    mode: "0755"
+  when: knot_client_ptr_enabled | bool
+
+- name: Install the client PTR policy Lua
+  ansible.builtin.template:
+    src: client-ptr.lua.j2
+    dest: "{{ knot_client_ptr_lua }}"
+    mode: "0644"
+  when: knot_client_ptr_enabled | bool
+
+- name: Install the lease export service and timer
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "/etc/systemd/system/{{ item.dest }}"
+    mode: "0644"
+  loop:
+    - { src: client-ptr.service.j2, dest: client-ptr.service }
+    - { src: client-ptr.timer.j2, dest: client-ptr.timer }
+  when: knot_client_ptr_enabled | bool
+
+- name: Enable and start the lease export timer
+  ansible.builtin.systemd_service:
+    name: knot-client-ptr.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  # In check mode the unit file was not written, so systemd cannot find it.
+  when: (knot_client_ptr_enabled | bool) and not ansible_check_mode
+
+- name: Remove the client PTR artefacts when the feature is off
+  ansible.builtin.systemd_service:
+    name: knot-client-ptr.timer
+    enabled: false
+    state: stopped
+    daemon_reload: true
+  when: not (knot_client_ptr_enabled | bool)
+  failed_when: false
+
+- name: Remove the client PTR files when the feature is off
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ knot_client_ptr_export }}"
+    - "{{ knot_client_ptr_lua }}"
+    - /etc/systemd/system/client-ptr.service
+    - /etc/systemd/system/client-ptr.timer
+  when: not (knot_client_ptr_enabled | bool)

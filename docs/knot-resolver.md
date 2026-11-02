@@ -81,11 +81,11 @@ kresd, removes `data.mdb` and retries once.
 
 Two limits of the upstream data, both identical to the legacy unbound gateway:
 
-- **No IPv4 client PTRs.** The community DNS only serves gateway names in
-  `112.10.in-addr.arpa`; a client address in the mesh `/16` answers
-  `NXDOMAIN`. The gateway forwards that zone and does not synthesise records
-  from Kea leases — doing so would expose lease data and is not a decision
-  that has been taken.
+- **No IPv4 client PTRs upstream.** The community DNS only serves gateway
+  names in `112.10.in-addr.arpa`; a client address in the mesh `/16` answers
+  `NXDOMAIN`. The gateway forwards the zone; it can additionally synthesise
+  PTRs from its own Kea leases, but that is **opt-in** because it exposes
+  which addresses are currently leased (see below).
 - **Only ordinals 1-3 have gateway names.** `2a03:2267:R::10/::20/::30`
   resolve to `gwNN-new.<region>.hamburg.freifunk.net`; addresses for ordinals
   4 and 5 (including gw05's own address `::50`) fall back to the client naming
@@ -98,6 +98,48 @@ them case-insensitively (verified: `NODE.FFHH` returns the same CNAME as
 `node.ffhh`). That is an upstream property, not something kresd guarantees;
 if the upstream backend or its forwarding path changes, `ffhh` names could
 break the same way the reverse zone did.
+
+
+### IPv4 client PTR synthesis (opt-in)
+
+Kea knows every currently leased v4 address, so the gateway can answer those
+PTRs locally instead of forwarding them upstream:
+
+```
+dig -x 10.112.193.10 @127.0.0.1
+10.193.112.10.in-addr.arpa. 3600 IN PTR ipv4-0a70c10a.nowe.clients.hamburg.freifunk.net.
+```
+
+The name follows the upstream IPv6 client pattern, with the 32-bit address in
+8 hex nibbles instead of the 64-bit host part in 16:
+
+```
+10.112.65.37 -> ipv4-0a704125.sued.clients.hamburg.freifunk.net.
+```
+
+Mechanics:
+
+- `knot_client_ptr_enabled` (default `false`) enables the feature on a gateway.
+- `knot-client-ptr-export.service` + `.timer` copy Kea's memfile lease DB
+  (`/var/lib/kea/kea-leases4.csv`, `0640 root:_kea`) into a `0644` file under
+  `/var/lib/knot-resolver/` every minute, so the resolver user never needs
+  access to Kea's data.
+- `client-ptr.lua` is loaded by kresd, registers a `policy.suffix` rule for
+  `112.10.in-addr.arpa` **before** the forwarding rule, and answers PTRs for
+  leases whose `expire` is still in the future. Expired leases fall through to
+  the upstream forward (NXDOMAIN), exactly as without the feature.
+- Region labels come from `served_regions` (`hhsued` -> `sued`), so the
+  name is `ipv4-<hex>.<region>.clients.hamburg.freifunk.net`.
+
+Limits and caveats:
+
+- Only leases known to **this** gateway are answered. A client asking another
+  gateway's resolver can still get NXDOMAIN, so answers are resolver-local,
+  not network-wide. That is inherent: no gateway has a global lease view.
+- Static reservations from `update-dhcp-static` are not in the memfile lease
+  DB until used; the synthesis therefore covers dynamic leases only.
+- The feature reveals lease presence to anyone allowed by the resolver ACL.
+  Keep it off unless that is an accepted policy decision.
 
 ### Verification
 

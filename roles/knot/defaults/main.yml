@@ -22,3 +22,13 @@ knot_probe_seed: "{{ ansible_date_time.epoch if ansible_date_time is defined els
 
 # Start at boot (the client path depends on it: resolv.conf points at 127.0.0.1).
 knot_enable: true
+
+# --- IPv4 client PTR synthesis (opt-in, see docs/knot-resolver.md) ------
+# Off by default: answering PTRs from leases exposes which addresses are
+# currently leased. Enable per gateway only after that decision is taken.
+knot_client_ptr_enabled: false
+knot_client_ptr_source: /var/lib/kea/kea-leases4.csv
+knot_client_ptr_dir: /var/lib/knot-resolver
+knot_client_ptr_leases: /var/lib/knot-resolver/leases4.csv
+knot_client_ptr_lua: /etc/knot-resolver/client-ptr.lua
+knot_client_ptr_export: /usr/local/bin/knot-client-ptr-export

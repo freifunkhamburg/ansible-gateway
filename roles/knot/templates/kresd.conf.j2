@@ -155,6 +155,13 @@ for _, r in ipairs(regions) do
     end
 end
 
+{% if knot_client_ptr_enabled %}
+-- ---------- IPv4 client PTRs from Kea leases (opt-in) ------------------
+-- Registered BEFORE the reverse-zone forwarding rule so local answers win.
+-- See roles/knot/templates/client-ptr.lua.j2 and docs/knot-resolver.md.
+dofile('{{ knot_client_ptr_lua }}')
+
+{% endif %}
 -- ---------- ffhh zones ------------------------------------------------
 policy.add(policy.suffix(policy.FLAGS({'DNSSEC_INSECURE'}), {todname('ffhh')}))
 policy.add(policy.suffix(policy.FORWARD('{{ knot_upstream_ffhh }}'), {todname('ffhh')}))

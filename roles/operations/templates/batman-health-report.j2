@@ -1,0 +1,75 @@
+#!/bin/bash
+# Periodic batman-adv record: collect the mesh tables, write the dump/report,
+# keep one history line per run, and alert on syslog only for real failures.
+#
+# Exit codes of batman-health: 0 clean (INFO/WARN allowed), 1 ERROR finding,
+# 2 collection failed (no batctl, no mesh interfaces).
+#
+# Run from cron as root; the netlink debug tables need root.
+set -u
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+state_dir="{{ batman_health_state_dir }}"
+dump="$state_dir/state.json"
+report="$state_dir/report.json"
+history="$state_dir/history.log"
+errlog="$state_dir/last-error.log"
+
+mkdir -p "$state_dir" || exit 0
+
+rc=0
+{{ batman_health }} --dump "$dump" --json > "$report.new.$$" 2> "$errlog" || rc=$?
+
+# Never replace a good report with an empty one: on a collection failure the
+# previous report stays in place and only last-error.log changes.
+if [ -s "$report.new.$$" ]; then
+    mv -f "$report.new.$$" "$report"
+else
+    rm -f "$report.new.$$"
+fi
+
+counts="0 0"
+if [ -s "$report" ]; then
+    counts=$(jq -r '[.counts.ERROR // 0, .counts.WARN // 0] | @tsv' "$report" 2>/dev/null) \
+        || counts="0 0"
+fi
+read -r errors warnings <<< "$counts"
+
+# On a collection failure the retained report is the previous run's, so its
+# counts must not be presented as this run's result.
+if [ "$rc" -ge 2 ]; then
+    errors="n/a"
+    warnings="n/a"
+fi
+
+# Per-mesh originator counts make the history useful for spotting a shrinking
+# mesh, not just a pass/fail.
+meshes=""
+if [ -s "$dump" ]; then
+    meshes=$(jq -r '[.meshes | to_entries[]
+                    | "\(.key):\(.value.originators | length)"] | join(" ")' \
+                "$dump" 2>/dev/null) || meshes=""
+fi
+
+printf '%s rc=%s errors=%s warnings=%s %s\n' \
+    "$(date -Is)" "$rc" "$errors" "$warnings" "$meshes" >> "$history"
+tail -n {{ batman_health_history_lines }} "$history" > "$history.new" && \
+    mv -f "$history.new" "$history"
+
+case "$rc" in
+    0)
+        ;;
+    1)
+        findings=$(jq -r '.findings[] | select(.level == "ERROR")
+                          | "\(.code) [\(.mesh)] \(.message)"' "$report" 2>/dev/null \
+                   | tr '\n' ';' | sed 's/;$//')
+        logger -p daemon.warning -t {{ batman_health_alert_tag }} \
+            "batman health: ${errors} error(s), ${warnings} warning(s): ${findings} (dump {{ batman_health_state_dir }}/state.json)"
+        ;;
+    *)
+        logger -p daemon.err -t {{ batman_health_alert_tag }} \
+            "batman health: collection failed (rc=${rc}): $(tr '\n' ' ' < "$errlog")"
+        ;;
+esac
+
+exit 0

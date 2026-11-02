@@ -1,0 +1,73 @@
+{#
+  Kea 6: informational service only () — no address pools. The
+  advertised DNS servers are this gateway's primary-region v6 address;
+  radvd (BIRD) handles the default route, so DHCPv6 hands out DNS info and
+  the refresh interval.
+#}
+{
+    "Dhcp6": {
+        "interfaces-config": {
+            "interfaces": [
+{% for i in kea_dhcp6_interfaces %}
+                "{{ i }}"{{ "," if not loop.last else "" }}
+{% endfor %}
+            ]
+        },
+
+        "server-id": {
+            "type": "EN",
+            "enterprise-id": {{ kea_dhcp6_server_id.enterprise_id }},
+            "identifier": "{{ kea_dhcp6_server_id.identifier }}",
+            "persist": false
+        },
+
+        "option-data": [
+            {# informational DHCPv6: an INFO-REQUEST reply only carries
+               options flagged always-send (without the flag neither the DNS
+               nor the NTP option is sent — verified against Kea 3.0.5). #}
+            {
+                "name": "information-refresh-time",
+                "data": "{{ kea_dhcp6_info_refresh }}",
+                "always-send": true
+            },
+            {
+                "name": "dns-servers",
+                "code": 23,
+                "space": "dhcp6",
+                "csv-format": true,
+                "data": "{{ kea_dhcp6_dns }}",
+                "always-send": true
+            },
+            {# RFC 5908 option 56: NTP Server Option, one IPv6-address suboption
+               (code 1, 16 bytes) per server. Kea's built-in option-56
+               definition truncates FQDN suboptions to 16 bytes, so raw hex
+               is used here; Kea splits it into one option-56 per server. #}
+            {
+                "code": 56,
+                "space": "dhcp6",
+                "csv-format": false,
+                "always-send": true,
+                "data": "{% for a in kea_ntp_v6_addresses %}00010010{{ a | replace(':', '') }}{% endfor %}"
+            }
+        ],
+
+        "lease-database": {
+            "type": "memfile",
+            "lfc-interval": 3600
+        },
+
+        {# INFO packet-level logging is not wanted in the journal; WARN keeps
+           errors and config problems only. #}
+        "loggers": [
+            {
+                "name": "kea-dhcp6",
+                "output_options": [
+                    {
+                        "output": "syslog"
+                    }
+                ],
+                "severity": "WARN"
+            }
+        ]
+    }
+}

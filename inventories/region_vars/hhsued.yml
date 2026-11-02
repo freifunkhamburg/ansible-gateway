@@ -1,0 +1,27 @@
+# Freifunk Hamburg region: hhsued.
+#
+# Region data only: subnet, numbering, tunnel ports and the Kea block. The
+# gateway address inside the subnet is derived from gw_index; the DHCP pool
+# is a gateway fact (host_vars gw_kea_pools).
+
+hhsued:
+  id: hhsued
+  interface_file: hh-sued
+  gluon_domain: ffhh_sued
+
+  region_index: 1
+  # Ordering in the OSPF and DHCPv6 interface lists.
+  ospf_index: 4
+  dhcp6_index: 1
+
+  v4_net: "10.112.64.0/19"
+  v6_prefix: "2a03:2267:1::/64"
+  tunnel_slots:
+    - { port: 10003 }
+    - { port: 10004 }
+
+  # false: this region's OSPF interface is `stub`; hhwest is the NBMA region.
+  ospf_nbma: false
+
+  kea:
+    static_include: "/var/lib/dhcp-static/static-sued.json"

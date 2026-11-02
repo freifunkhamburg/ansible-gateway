@@ -1,0 +1,34 @@
+#
+# Managed by Ansible (roles/services). Do not edit by hand.
+#
+# chrony is the selected time daemon; ntpsec stays in this repo but is
+# de-selected (see ntp_backend in group_vars/all/main.yml).
+#
+driftfile /var/lib/chrony/chrony.drift
+logdir /var/log/chrony
+log tracking statistics
+rtcsync
+makestep 1.0 -1
+maxslewrate 1000
+maxupdateskew 100.0
+
+# Upstream time sources. chrony has no -4/-6 switch: it resolves both the A
+# and AAAA records of each name.
+{% for s in ntp_upstream_servers %}
+server {{ s }} iburst
+{% endfor %}
+
+# Serve time from the local clock when unsynchronised.
+local stratum 10
+
+# Mesh-only NTP service: no client access by default, so upstream peers are
+# not served. The mesh aggregates are the shared policy values.
+allow {{ mesh_v4_aggregate }}
+allow {{ mesh_v6_aggregate }}
+allow fe80::/10
+allow 127.0.0.1
+allow ::1
+
+# Rate limiting: 8 s minimum interval, bursts allowed.
+ratelimit interval 3 burst 20 kod 2
+clientloglimit 4194304

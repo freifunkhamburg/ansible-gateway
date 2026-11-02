@@ -1,0 +1,16 @@
+#!/bin/bash /usr/local/include/ffnord-update.common
+
+FASTD_ROOT=/var/lib/fastd
+
+pull() {
+  for FASTD_PEER in $(find ${FASTD_ROOT} -type d -name *peers); do
+    if [ -d "${FASTD_PEER}/.git" ] ; then
+      cd "$FASTD_PEER"
+      git pull -q
+    fi
+  done
+}
+
+reload() {
+  pkill -HUP -x fastd || true
+}

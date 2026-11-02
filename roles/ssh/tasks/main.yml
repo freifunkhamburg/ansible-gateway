@@ -1,0 +1,74 @@
+---
+- name: Ensure the sshd config drop-in directory exists
+  ansible.builtin.file:
+    path: "{{ ssh_dropin | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render the sshd hardening drop-in
+  ansible.builtin.template:
+    src: ffhh-hardening.conf.j2
+    dest: "{{ ssh_dropin }}"
+    owner: root
+    group: root
+    mode: "0644"
+    validate: "/usr/sbin/sshd -t -f %s"
+  notify: restart ssh
+
+- name: Look up the administrator accounts
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ ffhh_ssh_authorized_keys.keys() | join(',') }}"
+
+- name: Set the home directories of the administrator accounts
+  ansible.builtin.set_fact:
+    ssh_admin_homes: >-
+      {{ ssh_admin_homes | default({}) | combine({item: getent_passwd[item][4]}) }}
+  loop: "{{ ffhh_ssh_authorized_keys.keys() | list }}"
+
+- name: Ensure the .ssh directories exist
+  ansible.builtin.file:
+    path: "{{ (ssh_admin_homes[item.0.key] ~ '/.ssh') if item.0.key != 'root' else '/root/.ssh' }}"
+    state: directory
+    owner: "{{ item.0.key }}"
+    group: "{{ item.0.key }}"
+    mode: "0700"
+  loop: "{{ ffhh_ssh_authorized_keys | dict2items | subelements('value') }}"
+  loop_control:
+    label: "{{ item.0.key }}"
+
+- name: Install administrator keys
+  ansible.builtin.lineinfile:
+    path: "{{ ((ssh_admin_homes[item.0.key] ~ '/.ssh/authorized_keys') if item.0.key != 'root' else '/root/.ssh/authorized_keys') }}"
+    line: "{{ item.1 }}"
+    create: true
+    owner: "{{ item.0.key }}"
+    group: "{{ item.0.key }}"
+    mode: "0600"
+  loop: "{{ ffhh_ssh_authorized_keys | dict2items | subelements('value') }}"
+  loop_control:
+    label: "{{ item.0 }} {{ item.1.split(' ')[1][:16] }}…"
+
+- name: Flush handlers so the sshd policy is live before finishing
+  meta: flush_handlers
+
+- name: Report the effective authentication policy
+  ansible.builtin.command: sshd -T
+  register: sshd_effective
+  changed_when: false
+  check_mode: false
+
+- name: Assert key-only authentication is in effect
+  ansible.builtin.assert:
+    that:
+      - "'passwordauthentication no' in sshd_effective.stdout"
+      - "'kbdinteractiveauthentication no' in sshd_effective.stdout"
+      - "'pubkeyauthentication yes' in sshd_effective.stdout"
+      # sshd -T renders the key-only root policy as 'without-password'
+      # (the internal name of prohibit-password)
+      - "'permitrootlogin without-password' in sshd_effective.stdout or 'permitrootlogin no' in sshd_effective.stdout"
+    fail_msg: "sshd -T does not show the hardened authentication policy"
+    quiet: true
+  when: not ansible_check_mode

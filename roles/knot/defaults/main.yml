@@ -1,0 +1,24 @@
+---
+# Knot Resolver as the client-facing resolver (port 53).
+#
+# The build itself lives in roles/knot_build (role dependency), so this
+# role only renders the runtime configuration and unit. The Lua API used here
+# is the same in Knot Resolver 5.7 and 6.x, so the config survives rebuilds.
+knot_conf: /etc/knot-resolver/kresd.conf
+knot_unit: knot-resolver.service
+knot_workdir: /var/lib/knot-resolver
+knot_cache_dir: /run/knot-resolver
+knot_bin: /usr/local/sbin/kresd
+knot_user: knot-resolver
+knot_port: 53
+knot_cache_mb: 100
+knot_upstream_ffhh: "2a00:14b0:4200:3380:134::1"
+
+# Seed for the fresh IPv6 client PTR probe. It defaults to the current epoch so
+# each playbook run probes a different address; that keeps the assertion from
+# being satisfied by a cached answer. Set it to a fixed value to reproduce a
+# specific probe.
+knot_probe_seed: "{{ ansible_date_time.epoch if ansible_date_time is defined else '0' }}"
+
+# Start at boot (the client path depends on it: resolv.conf points at 127.0.0.1).
+knot_enable: true

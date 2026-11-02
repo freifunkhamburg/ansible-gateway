@@ -1,0 +1,14 @@
+# Example vault file. Copy to vault.yml, fill the fastd secrets, then
+# `ansible-vault encrypt vault.yml`. Never commit plaintext.
+#
+# Keys are fastd instance names, derived from gw_index and the region table
+# (e.g. gw05 -> <region>05 / <region>08).
+fastd_secrets:
+  hhsued05: "REPLACE_WITH_OPERATOR_SECRET"
+  hhsued08: "REPLACE_WITH_OPERATOR_SECRET"
+  hhwest05: "REPLACE_WITH_OPERATOR_SECRET"
+  hhwest08: "REPLACE_WITH_OPERATOR_SECRET"
+  hhnowe05: "REPLACE_WITH_OPERATOR_SECRET"
+  hhnowe08: "REPLACE_WITH_OPERATOR_SECRET"
+  hhost05: "REPLACE_WITH_OPERATOR_SECRET"
+  hhost08: "REPLACE_WITH_OPERATOR_SECRET"

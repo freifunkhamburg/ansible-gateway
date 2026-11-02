@@ -1,0 +1,369 @@
+---
+# Operational layer: health automation, helper scripts, cron, metrics helpers.
+
+- name: Install operational packages
+  ansible.builtin.apt:
+    name: "{{ operations_packages }}"
+    state: present
+    cache_valid_time: 3600
+
+# TAPs are created with `ip tuntap`; the only thing used from uml-utilities
+# was tunctl. Its init script starts uml_switch, an unused UML virtual switch.
+- name: Check whether uml-utilities is installed
+  ansible.builtin.command: dpkg-query -W -f='${db:Status-Abbrev}' uml-utilities
+  register: uml_pkg
+  changed_when: false
+  failed_when: false
+
+- name: Purge uml-utilities (tunctl no longer used; uml_switch is unused)
+  ansible.builtin.command: apt-get purge -y uml-utilities
+  when: uml_pkg.rc == 0
+  register: uml_purge
+  changed_when: "'Purging' in uml_purge.stdout or 'REMOVED' in uml_purge.stdout"
+
+- name: Derive the local control address from the primary region
+  ansible.builtin.set_fact:
+    gw_local_v4: >-
+      {{ served_regions | selectattr('id', 'equalto', gateway_primary_region)
+         | map(attribute='v4_host') | first }}
+
+- name: Render /etc/ffnord (gateway health parameters)
+  ansible.builtin.template:
+    src: ffnord.j2
+    dest: "{{ ffnord_conf }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Ensure the shared include directory exists
+  ansible.builtin.file:
+    path: /usr/local/include
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render ffnord-update.common
+  ansible.builtin.template:
+    src: ffnord-update.common.j2
+    dest: /usr/local/include/ffnord-update.common
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Render update helpers (fastd keys)
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/usr/local/bin/{{ item }}"
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - update-fastd-keys
+
+- name: Render gateway health script
+  ansible.builtin.template:
+    src: check-gateway.j2
+    dest: /usr/local/bin/check-gateway
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render Kea lease query helper
+  ansible.builtin.template:
+    src: kea-dhcp4-query.j2
+    dest: /usr/local/bin/kea-dhcp4-query
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render fastd status query helper
+  ansible.builtin.template:
+    src: fastd-query.j2
+    dest: /usr/local/bin/fastd-query
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render check scripts
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/root/{{ item }}"
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - check.sh
+    - check-sanitized.sh
+
+# --- motd: checks run every 5 min, login only reads the result ----------
+- name: Install the batman health checker
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../tools/batman-health.py"
+    dest: "{{ batman_health }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+# --- periodic batman health record -------------------------------------
+- name: Ensure the batman health state directory exists
+  ansible.builtin.file:
+    path: "{{ batman_health_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render the periodic batman health reporter
+  ansible.builtin.template:
+    src: batman-health-report.j2
+    dest: /usr/local/bin/batman-health-report
+    owner: root
+    group: root
+    mode: "0755"
+
+# --- software update check (components not from Debian apt) -------------
+# The checker and its catalog are installed here so the single-run playbook
+# owns them; the optional gateway-check-upstreams.yml only runs/verifies.
+- name: Ensure the shared script data directory exists
+  ansible.builtin.file:
+    path: "{{ upstream_check_catalog | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the software update checker
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../tools/check-upstream-versions.py"
+    dest: "{{ upstream_check_bin }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the software update catalog
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../tools/upstream-versions.yml"
+    dest: "{{ upstream_check_catalog }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Ensure the software update state directory exists
+  ansible.builtin.file:
+    path: "{{ upstream_versions_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render the periodic software update reporter
+  ansible.builtin.template:
+    src: upstream-versions-report.j2
+    dest: /usr/local/bin/upstream-versions-report
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render the motd generator
+  ansible.builtin.template:
+    src: motd-refresh.j2
+    dest: /usr/local/bin/motd-refresh
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Print the generated motd tail at login
+  ansible.builtin.lineinfile:
+    path: "{{ item }}"
+    insertafter: '^session\s+optional\s+pam_motd\.so\s+noupdate'
+    line: "session    optional   pam_motd.so motd={{ motd_tail }} noupdate"
+    state: present
+  loop:
+    - /etc/pam.d/login
+    - /etc/pam.d/sshd
+
+- name: Run the software update check once
+  ansible.builtin.command: /usr/local/bin/upstream-versions-report
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Generate the motd now (so the first login already sees it)
+  ansible.builtin.command: /usr/local/bin/motd-refresh
+  changed_when: false
+
+- name: Ensure the vnstat graph directory exists
+  ansible.builtin.file:
+    path: /var/www/html
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# --- vnstat interface policy -------------------------------------------
+- name: Compose the monitored interface list
+  ansible.builtin.set_fact:
+    vnstat_interfaces: >-
+      {{ ['uplink', 'intra-as']
+         + served_regions | map(attribute='bat_if') | list
+         + served_regions | map(attribute='id')
+           | map('regex_replace', '^', 'mesh-') | list }}
+  when: vnstat_interfaces | length == 0
+
+- name: Render /etc/vnstat.conf (explicit interface policy)
+  ansible.builtin.template:
+    src: vnstat.conf.j2
+    dest: "{{ vnstat_conf }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart vnstat daemon
+
+- name: Ensure the database contains exactly the configured interfaces
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      want="{{ vnstat_interfaces | join(' ') }}"
+      for iface in $want; do
+        if ! vnstat --json -i "$iface" >/dev/null 2>&1; then
+          vnstat --add -i "$iface" >/dev/null
+          echo "added $iface"
+        fi
+      done
+      vnstat --json 2>/dev/null | python3 -c '
+      import json, sys
+      want = set(sys.argv[1].split())
+      db = json.load(sys.stdin)
+      for entry in db.get("interfaces", []):
+          if entry["name"] not in want:
+              print(entry["name"])
+      ' "$want" | while read -r iface; do
+        vnstat --remove --force -i "$iface" >/dev/null
+        echo "removed $iface"
+      done
+    executable: /bin/bash
+  register: vnstat_ifaces
+  changed_when: vnstat_ifaces.stdout | trim | length > 0
+
+- name: Apply the vnstat configuration
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify the monitored interface set
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      actual=$(vnstat --json | python3 -c '
+      import json, sys
+      print(" ".join(sorted(e["name"] for e in json.load(sys.stdin).get("interfaces", []))))
+      ')
+      echo "$actual"
+    executable: /bin/bash
+  register: vnstat_verify
+  changed_when: false
+
+- name: Assert the monitored interface set is exactly as configured
+  ansible.builtin.assert:
+    that:
+      - (vnstat_verify.stdout.split() | sort) ==
+        (vnstat_interfaces | sort)
+    fail_msg: >-
+      vnstat database interfaces are {{ vnstat_verify.stdout | trim }},
+      expected {{ vnstat_interfaces | join(' ') }}
+  when: not ansible_check_mode
+
+- name: Render cron jobs
+  ansible.builtin.template:
+    src: "cron/{{ item }}.j2"
+    dest: "/etc/cron.d/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - gateway
+    - fastd
+    - check
+    - vnstat
+    - batman-health
+    - upstream-versions
+
+# --- verify the periodic batman health record --------------------------
+- name: Run the batman health reporter once
+  ansible.builtin.command: /usr/local/bin/batman-health-report
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Check the batman health state files
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: batman_state_files
+  loop:
+    - "{{ batman_health_state_dir }}/report.json"
+    - "{{ batman_health_state_dir }}/history.log"
+  when: not ansible_check_mode
+
+- name: Read the latest batman health report
+  ansible.builtin.command:
+    argv:
+      - jq
+      - -e
+      - '.meshes | length > 0'
+      - "{{ batman_health_state_dir }}/report.json"
+  register: batman_report_check
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Assert the periodic record was produced
+  ansible.builtin.assert:
+    that:
+      - batman_report_check.rc == 0
+      - batman_state_files.results[0].stat.exists
+      - batman_state_files.results[1].stat.exists
+      - batman_state_files.results[1].stat.size > 0
+    fail_msg: >-
+      the periodic batman health record is missing or unreadable in
+      {{ batman_health_state_dir }}
+  when: not ansible_check_mode
+
+# --- verify the software update check ----------------------------------
+- name: Check the software update state files
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: upstream_state_files
+  loop:
+    - "{{ upstream_versions_state_dir }}/summary.txt"
+    - "{{ upstream_versions_state_dir }}/state.json"
+  when: not ansible_check_mode
+
+- name: Read the software update summary
+  ansible.builtin.command:
+    argv:
+      - cat
+      - "{{ upstream_versions_state_dir }}/summary.txt"
+  register: upstream_summary
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Read the cached software update result
+  ansible.builtin.command:
+    argv:
+      - jq
+      - -e
+      - '.counts.total > 0'
+      - "{{ upstream_versions_state_dir }}/state.json"
+  register: upstream_state_check
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Assert the software update summary is present and the cache is valid
+  ansible.builtin.assert:
+    that:
+      - upstream_state_files.results[0].stat.exists
+      - upstream_state_files.results[0].stat.size > 0
+      - upstream_summary.stdout.startswith('SOFTWARE UPDATES:')
+      - upstream_summary.stdout is not search('all 0 components')
+      - upstream_state_files.results[1].stat.exists
+      - upstream_state_check.rc == 0
+    fail_msg: >-
+      the software update summary is missing or the cached result is invalid in
+      {{ upstream_versions_state_dir }} ({{ upstream_summary.stdout | trim }})
+  when: not ansible_check_mode

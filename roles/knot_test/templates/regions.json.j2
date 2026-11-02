@@ -1,0 +1,23 @@
+[
+{% for r in served_regions %}
+  {
+    "id": "{{ r.id }}",
+    "v4_net": "{{ r.v4_net }}",
+    "v6_site": "{{ r.v6_site }}",
+    "listen4": "{{ r.v4_host }}",
+    "listen6": "{{ r.v6_host }}",
+    "gw4": "{{ r.v4_net | host_in(1) | addr_only }}",
+    "gw6": "{{ r.v6_prefix | host_in(1) | addr_only }}",
+    "ntp6": [
+      "{{ r.v6_prefix | host_in(16) | addr_only }}",
+      "{{ r.v6_prefix | host_in(32) | addr_only }}",
+      "{{ r.v6_prefix | host_in(48) | addr_only }}"
+    ],
+    "ntp4": [
+      "{{ r.ntp_v4[0] }}",
+      "{{ r.ntp_v4[1] }}",
+      "{{ r.ntp_v4[2] }}"
+    ]
+  }{% if not loop.last %},{% endif %}
+{% endfor %}
+]

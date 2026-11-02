@@ -1,0 +1,46 @@
+# Netfilter rules for {{ ffhh_host_name }} (Debian 13 base), IPv6.
+#
+# The mesh aggregate and the per-region /64 guards come from inventory;
+# port ranges and the MSS clamp are policy. teredo/6to4 fastd-port drops are
+# protocol policy. IPv6 conntrack is not used on these gateways (raw NOTRACK).
+
+*raw
+:PREROUTING ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+-A PREROUTING -j CT --notrack
+-A OUTPUT -j CT --notrack
+COMMIT
+
+*filter
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+-A INPUT -s {{ mesh_v6_aggregate }} -p udp -m udp --dport 10000:10010 -j DROP
+-A INPUT -s 2001::/32 -p udp -m udp --dport 10000:10010 -m comment --comment "no fastd via teredo" -j DROP
+-A INPUT -s 2002::/16 -p udp -m udp --dport 10000:10010 -m comment --comment "no fastd via 6to4" -j DROP
+-A INPUT -s {{ mesh_v6_aggregate }} -p udp -m udp --dport 5000:5010 -j ACCEPT
+-A INPUT -p udp -m udp --dport 5000:5010 -j DROP
+-A INPUT -p tcp -m tcp --dport 161 -j DROP
+-A INPUT ! -s {{ mesh_v6_aggregate }} -p udp -m udp --dport 123 -m recent --set --name NTPTRAFFIC --mask ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff --rsource
+-A INPUT ! -s {{ mesh_v6_aggregate }} -p udp -m udp --dport 123 -m recent --update --seconds 30 --hitcount 20 --name NTPTRAFFIC --mask ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff --rsource -j DROP
+-A INPUT -p udp -m udp --dport 123 -j ACCEPT
+-A INPUT -p tcp -m tcp --dport 9000:9999 -j DROP
+-A FORWARD ! -s {{ mesh_v6_aggregate }} -o {{ uplink_if }} -j DROP
+{% for r in served_regions %}
+-A FORWARD -s {{ r.v6_prefix }} -i {{ r.bat_if }} -o {{ uplink_if }} -j ACCEPT
+{% endfor %}
+{% for r in served_regions %}
+-A FORWARD ! -s {{ r.v6_prefix }} -i {{ r.bat_if }} -o {{ uplink_if }} -j DROP
+{% endfor %}
+-A FORWARD -o {{ uplink_if }} -p tcp -m tcp --tcp-flags SYN,RST SYN -m tcpmss ! --mss 0:1220 -j TCPMSS --set-mss 1220
+COMMIT
+
+*mangle
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+-A PREROUTING -i {{ uplink_if }} -j MARK --set-xmark 0x1/0xffffffff
+-A PREROUTING -i bat-* -j MARK --set-xmark 0x1/0xffffffff
+COMMIT

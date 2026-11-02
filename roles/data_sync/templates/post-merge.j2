@@ -1,0 +1,10 @@
+#!/bin/sh
+# Each data checkout carries a post-merge hook that runs the matching reload
+# script, so the periodic `git pull` regenerates derived configuration only
+# when upstream data actually changed (git does not run post-merge for
+# "Already up to date").
+#
+# The guard keeps the hook harmless when the script has not been rendered yet.
+if [ -x "{{ item.script }}" ]; then
+  "{{ item.script }}" reload
+fi

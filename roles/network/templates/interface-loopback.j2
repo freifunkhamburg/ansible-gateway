@@ -1,0 +1,13 @@
+# Published NAT addresses (the dummy0 loopback), derived from
+# gateways.
+auto {{ dummy_if }}
+iface {{ dummy_if }} inet static
+  pre-up /sbin/ip link add $IFACE type dummy || true
+  address   {{ dummy_v4_addresses[0] | regex_replace('/32$', '') }}
+  netmask   255.255.255.255
+{% for a in dummy_v4_addresses[1:] %}
+  up        /sbin/ip a add {{ a }} dev $IFACE || true
+{% endfor %}
+  # no IPv6 identity and no RA acceptance on the published NAT interface
+  post-up   /sbin/sysctl -w net.ipv6.conf.$IFACE.accept_ra=0
+  post-up   /sbin/sysctl -w net.ipv6.conf.$IFACE.autoconf=0

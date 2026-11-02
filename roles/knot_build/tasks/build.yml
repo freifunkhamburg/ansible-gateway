@@ -1,0 +1,148 @@
+---
+# Build the production Knot Resolver at the newest upstream release and install
+# it into a prefix. Only reached when dns_backend == "knot"; the reference test
+# instance (roles/knot_test) has its own build.
+#
+# Idempotent: rebuilds only when the installed version does not match the
+# desired tag or the runtime Lua tree is missing.
+
+- name: Install the Knot Resolver build dependencies
+  ansible.builtin.apt:
+    name: "{{ knot_build_deps }}"
+    state: present
+
+- name: Resolve the newest upstream release tag
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      git ls-remote --tags --refs "{{ knot_repo }}" \
+        | sed 's#.*refs/tags/##' \
+        | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+        | sort -V | tail -1
+    executable: /bin/bash
+  register: knot_latest_tag
+  changed_when: false
+  # read-only: run it in check mode too, so the tag assert has a value
+  check_mode: false
+  when: knot_tag == ""
+
+- name: Select the target release
+  ansible.builtin.set_fact:
+    knot_desired_tag: >-
+      {{ knot_tag if knot_tag else
+         (knot_latest_tag.stdout | default('') | trim) }}
+
+- name: Assert a release tag was resolved
+  ansible.builtin.assert:
+    that:
+      - knot_desired_tag is defined
+      - knot_desired_tag | length > 0
+    fail_msg: "could not resolve a Knot Resolver release tag (repo unreachable?)"
+
+- name: Read the currently installed release
+  ansible.builtin.command: "{{ knot_bin }} --version"
+  register: knot_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Check whether the source tree is present
+  ansible.builtin.stat:
+    path: "{{ knot_build_dir }}/.git"
+  register: knot_src_stat
+  check_mode: false
+
+- name: Check whether the runtime Lua tree is present
+  ansible.builtin.stat:
+    path: "{{ knot_runtime_dir }}/sandbox.lua"
+  register: knot_runtime_stat
+  check_mode: false
+
+# Rebuild when the installed binary is not the desired release, when the source
+# tree is missing, or when the installed runtime tree is incomplete.
+- name: Decide whether a build is needed
+  ansible.builtin.set_fact:
+    knot_needs_build: >-
+      {{ knot_desired_tag.lstrip('v') not in (knot_installed.stdout | default(''))
+         or not knot_src_stat.stat.exists
+         or not knot_runtime_stat.stat.exists }}
+
+- name: Ensure the source parent directory exists
+  ansible.builtin.file:
+    path: "{{ knot_build_dir | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: knot_needs_build | bool
+
+- name: Clone or refresh the source at the desired tag
+  ansible.builtin.shell: |
+    set -e
+    if [ -d "{{ knot_build_dir }}/.git" ]; then
+      git -C "{{ knot_build_dir }}" fetch --tags --depth 1 origin
+    else
+      git clone --branch "{{ knot_desired_tag }}" --depth 1 \
+        "{{ knot_repo }}" "{{ knot_build_dir }}"
+    fi
+    git -C "{{ knot_build_dir }}" checkout -f "{{ knot_desired_tag }}"
+    # modules/policy needs lua-aho-corasick; without it meson setup fails.
+    git -C "{{ knot_build_dir }}" submodule update --init --recursive
+  register: knot_src
+  changed_when: true
+  when:
+    - knot_needs_build | bool
+    - not ansible_check_mode
+
+- name: Configure the build
+  ansible.builtin.shell: |
+    set -e
+    if [ -d build ]; then
+      meson setup --reconfigure build {{ knot_build_opts | join(' ') }}
+    else
+      meson setup build {{ knot_build_opts | join(' ') }}
+    fi
+  args:
+    chdir: "{{ knot_build_dir }}"
+  changed_when: true
+  when:
+    - knot_needs_build | bool
+    - not ansible_check_mode
+
+- name: Compile
+  ansible.builtin.command: ninja -C build
+  args:
+    chdir: "{{ knot_build_dir }}"
+  changed_when: true
+  when:
+    - knot_needs_build | bool
+    - not ansible_check_mode
+
+- name: Install to the prefix
+  ansible.builtin.command: meson install -C build
+  args:
+    chdir: "{{ knot_build_dir }}"
+  changed_when: true
+  when:
+    - knot_needs_build | bool
+    - not ansible_check_mode
+
+- name: Refresh the linker cache for the built libkres
+  ansible.builtin.command: ldconfig
+  changed_when: false
+  when:
+    - knot_needs_build | bool
+    - not ansible_check_mode
+
+- name: Verify the installed release
+  ansible.builtin.command: "{{ knot_bin }} --version"
+  register: knot_version
+  changed_when: false
+  check_mode: false
+
+- name: Assert the built version matches the desired tag
+  ansible.builtin.assert:
+    that: "knot_desired_tag.lstrip('v') in knot_version.stdout"
+    fail_msg: >-
+      {{ knot_bin }} reports {{ knot_version.stdout }}; expected
+      {{ knot_desired_tag }}.

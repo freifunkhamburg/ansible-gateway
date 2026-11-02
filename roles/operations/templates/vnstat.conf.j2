@@ -1,0 +1,25 @@
+#
+# Managed by Ansible (roles/operations). Do not edit by hand.
+#
+# Interface policy: ONLY the interfaces listed in vnstat_interfaces are
+# monitored. Ansible adds them to the database explicitly and removes any
+# other entry, and vnstatd is told not to create entries for interfaces it
+# discovers on its own (AlwaysAddNewInterfaces 0). A new network interface
+# therefore becomes visible only after the interface list is updated in
+# inventories and the playbook is run again.
+#
+DatabaseDir "/var/lib/vnstat"
+
+# Default interface for plain `vnstat` / `vnstati` output; the hourly graphs
+# pass -i uplink explicitly.
+Interface "uplink"
+
+# Never auto-create database entries for newly appearing interfaces.
+AlwaysAddNewInterfaces 0
+
+# Daemon timing values from the reference gateways.
+SaveInterval 5
+OfflineSaveInterval 30
+Sampletime 5
+PollInterval 5
+UpdateInterval 20

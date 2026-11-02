@@ -1,0 +1,96 @@
+---
+# respondd from the upstream mesh-announce checkout.
+#
+# ALL domains are served by ONE process: upstream maps each request to a
+# domain by the interface it was received on, so a single process answering
+# on port 1001 cannot mix up the regions. The multicast group is joined on
+# every registered bat-<region> device.
+#
+# mesh_announce_domains is composed by roles/regions from gw_regions:
+#   { region: <region id>, domain: <Gluon domain>, bat_if: <bat interface> }
+
+- name: Assert the domain list is usable
+  ansible.builtin.assert:
+    that:
+      - mesh_announce_domains | length > 0
+      - mesh_announce_domains | map(attribute='region') | list | length ==
+        mesh_announce_domains | map(attribute='region') | list | unique | length
+      - mesh_announce_domains | map(attribute='domain') | list | length ==
+        mesh_announce_domains | map(attribute='domain') | list | unique | length
+      - mesh_announce_domains | map(attribute='bat_if') | list | length ==
+        mesh_announce_domains | map(attribute='bat_if') | list | unique | length
+    fail_msg: "mesh_announce_domains must be non-empty and unique by region, domain and interface."
+
+- name: Install mesh-announce runtime dependencies
+  ansible.builtin.package:
+    name:
+      - python3-psutil
+      - git
+    state: present
+
+# --- checkout ---------------------------------------------------------
+- name: Check out mesh-announce
+  ansible.builtin.git:
+    repo: "{{ mesh_announce_repo }}"
+    dest: "{{ mesh_announce_dir }}"
+    version: "{{ mesh_announce_commit }}"
+    update: true
+  register: mesh_announce_checkout
+
+- name: Report the checked-out commit
+  ansible.builtin.debug:
+    msg: "mesh-announce at {{ mesh_announce_commit }} in {{ mesh_announce_dir }}"
+
+# --- configuration ----------------------------------------------------
+- name: Ensure the config directory exists
+  ansible.builtin.file:
+    path: "{{ mesh_announce_conf_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render the single respondd config for all domains
+  ansible.builtin.template:
+    src: respondd.conf.j2
+    dest: "{{ mesh_announce_conf_dir }}/respondd.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - reload systemd
+    - restart mesh-announce
+
+- name: Render the mesh-announce unit
+  ansible.builtin.template:
+    src: mesh-announce.service.j2
+    dest: "/etc/systemd/system/{{ mesh_announce_unit }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: reload systemd
+
+# --- start the single process -----------------------------------------
+- name: Start mesh-announce
+  ansible.builtin.systemd:
+    name: "{{ mesh_announce_unit }}"
+    state: started
+    enabled: true
+  notify: reload systemd
+
+- name: Verify every domain is registered and the process is active
+  ansible.builtin.shell: |
+    set -u
+    systemctl is-active {{ mesh_announce_unit }} | grep -q active || {
+      echo "{{ mesh_announce_unit }} is not active" >&2; exit 1; }
+    conf={{ mesh_announce_conf_dir }}/respondd.conf
+    for d in {% for item in mesh_announce_domains %}{{ item.domain }} {% endfor %}; do
+      grep -q "^\[$d\]" "$conf" || {
+        echo "domain $d missing from $conf" >&2; exit 1; }
+    done
+    echo "ok"
+  args:
+    executable: /bin/sh
+  register: mesh_announce_verify
+  changed_when: false
+  failed_when: "'ok' not in mesh_announce_verify.stdout"

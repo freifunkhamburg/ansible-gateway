@@ -1,0 +1,6 @@
+include "/etc/fastd/common.conf";
+interface "{{ item.iface }}";
+bind any:{{ item.port }};
+include "/etc/fastd/secret-{{ item.name }}.conf";
+status socket "{{ fastd_status_socket_dir }}/fastd-status.{{ item.iface | replace('vpn-', '') }}.sock";
+include peers from "{{ fastd_peer_dir }}";

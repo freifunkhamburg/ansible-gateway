@@ -1,0 +1,17 @@
+# respondd from the upstream mesh-announce checkout.
+# %i is the ffhh region id; the matching config is
+# {{ mesh_announce_conf_dir }}/respondd-%i.conf. Instances share UDP
+# port 1001 through MetadataUDPServer.allow_reuse_address, like the older
+# ffhh units.
+[Unit]
+Description=mesh-announce respondd for Freifunk region %I
+After=network.target
+
+[Service]
+ExecStart={{ mesh_announce_dir }}/respondd.py -f {{ mesh_announce_conf_dir }}/respondd-%i.conf -d {{ mesh_announce_dir }}/providers
+WorkingDirectory={{ mesh_announce_dir }}
+Restart=always
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+[Install]
+WantedBy=multi-user.target

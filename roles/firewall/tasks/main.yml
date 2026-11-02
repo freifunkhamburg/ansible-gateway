@@ -1,0 +1,65 @@
+---
+# iptables (nft-backed) + iptables-persistent, same rule language as the
+# reference gateways. Files render to the persistent locations, so
+# netfilter-persistent picks them up at boot; the live restore is opt-in.
+- name: Preseed iptables-persistent (do not prompt to save on install)
+  ansible.builtin.copy:
+    content: |
+      iptables-persistent iptables-persistent/autosave_v4 boolean false
+      iptables-persistent iptables-persistent/autosave_v6 boolean false
+    dest: /tmp/ffhh-iptables-preseed
+    owner: root
+    group: root
+    mode: "0600"
+  changed_when: false
+
+- name: Apply the preseed
+  ansible.builtin.command: /usr/bin/debconf-set-selections /tmp/ffhh-iptables-preseed
+  changed_when: false
+
+- name: Install netfilter packages
+  ansible.builtin.apt:
+    name:
+      - iptables
+      - iptables-persistent
+    state: present
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+- name: Ensure /etc/iptables exists
+  ansible.builtin.file:
+    path: /etc/iptables
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render the persistent IPv4 ruleset
+  ansible.builtin.template:
+    src: rules.v4.j2
+    dest: /etc/iptables/rules.v4
+    owner: root
+    group: root
+    mode: "0640"
+    validate: "/usr/sbin/iptables-restore --test %s"
+  register: rules_v4
+
+- name: Render the persistent IPv6 ruleset
+  ansible.builtin.template:
+    src: rules.v6.j2
+    dest: /etc/iptables/rules.v6
+    owner: root
+    group: root
+    mode: "0640"
+    validate: "/usr/sbin/ip6tables-restore --test %s"
+  register: rules_v6
+
+- name: Restore the IPv4 ruleset
+  ansible.builtin.shell: /usr/sbin/iptables-restore < /etc/iptables/rules.v4
+  when: rules_v4.changed
+  changed_when: true
+
+- name: Restore the IPv6 ruleset
+  ansible.builtin.shell: /usr/sbin/ip6tables-restore < /etc/iptables/rules.v6
+  when: rules_v6.changed
+  changed_when: true

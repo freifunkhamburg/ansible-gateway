@@ -1,0 +1,21 @@
+---
+# Knot Resolver build (production, port-53 instance).
+#
+# The distro package is removed unconditionally: its `libkres.so.9` would be
+# picked up instead of the built one, and its `kresd.target`/`kresd@.service`
+# units could start an unintended instance.
+#
+# The build itself is gated on the DNS backend: with `dns_backend: unbound`
+# nothing is built (no build dependencies pulled in), and switching back is a
+# one-line change plus one playbook run.
+#
+# roles/knot_test does not depend on this role; it builds its own instance.
+
+- name: Remove any distro Knot Resolver packages
+  ansible.builtin.apt:
+    name: "{{ knot_distro_packages }}"
+    state: absent
+
+- name: Build and install the Knot Resolver (knot backend selected)
+  ansible.builtin.include_tasks: build.yml
+  when: dns_backend == "knot"

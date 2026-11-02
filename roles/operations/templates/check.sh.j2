@@ -1,0 +1,124 @@
+#!/bin/bash
+{#  /root/check.sh.
+    Checks: default route, batman gateway mode per region, batman version,
+    conntrack, per-region DHCP lease usage, fastd instances / connections,
+    disk usage. Uses `batctl meshif`, Kea 3 subnet ids/control socket and
+    systemd unit names.
+
+    Percentages are computed with awk, which treats empty operands as 0 and
+    cannot produce a syntax error like `bc` can. #}
+
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+GLOBALSTATE=0
+
+trap_exit () {
+    rc=$?
+    [ $GLOBALSTATE -gt $rc ] && rc=$GLOBALSTATE
+    exit $rc
+}
+trap trap_exit EXIT
+
+valid () {
+    echo -e "\e[32mvalid"
+}
+invalid () {
+    echo -e "\e[91minvalid"
+    GLOBALSTATE=1
+}
+warn () {
+    echo -e "\e[91mwarn"
+}
+
+# percentage of $1/$2, empty/zero-safe
+ratio () {
+    awk -v a="${1:-0}" -v b="${2:-0}" \
+        'BEGIN { if ((b + 0) == 0) { printf "0.00" } else { printf "%.2f", (a + 0) / (b + 0) * 100 } }'
+}
+
+# verdict for a percentage: "valid" below warn, "warn" below max, else "invalid"
+verdict () {
+    awk -v r="${1:-0}" -v w="${2:-0}" -v m="${3:-0}" \
+        'BEGIN { if ((r + 0) < (w + 0)) print "valid"; else if ((r + 0) < (m + 0)) print "warn"; else print "invalid" }'
+}
+
+report_ratio () {
+    # $1 used, $2 total, $3 warn threshold, $4 max threshold
+    if [ -z "$1" ] || [ -z "$2" ]; then
+        invalid
+        return
+    fi
+    case "$(verdict "$(ratio "$1" "$2")" "$3" "$4")" in
+        valid) valid ;;
+        warn) warn ;;
+        *) invalid ;;
+    esac
+}
+
+read _ _ gateway6 _ dev6 _ < <(ip -6 route list table 42 match ::0);
+read _ _ gateway4 _ dev4 _ < <(ip route list table 42 match 0/0);
+
+echo -n -e "\e[39mIPv4: default gateway $gateway4 dev $dev4\t\t\t"
+[ "$gateway4" == "{{ gw_expect_gateway_v4 }}" ] && [ "$dev4" == "{{ uplink_if }}" ] && valid || invalid
+
+# IPv6 has no static uplink address: the default route comes from OSPFv3
+# (`default6`) over the uplink's link-local neighbour. A missing/next-hop-
+# switched v6 default is a real outage for mesh clients, so assert it too.
+echo -n -e "\e[39mIPv6: default gateway $gateway6 dev $dev6\t\t\t"
+[ -n "$gateway6" ] && [ "$dev6" == "{{ uplink_if }}" ] && valid || invalid
+
+# The uplink must stay link-local-only: no SLAAC address, no RA acceptance.
+uplink_ra=$(cat /proc/sys/net/ipv6/conf/{{ uplink_if }}/accept_ra 2>/dev/null)
+echo -n -e "\e[39mIPv6: uplink accept_ra $uplink_ra (link-local only)\t\t\t"
+[ "$uplink_ra" == "0" ] && valid || invalid
+
+{% for r in served_regions %}
+read server _ _ _ _ _ < <({{ batctl_path }} meshif {{ r.bat_if }} gw);
+echo -n -e "\e[39m({{ '%-6s'|format(r.id) }}) BATMAN: gateway mode set to $server\t\t\t"
+[ "$server" == "server" ] && valid || invalid
+
+{% endfor %}
+version=$("{{ batctl_path }}" -v | awk '{print $2}')
+echo -n -e "\e[39mBATMAN: version $version\t\t\t"
+[ "$version" == "{{ gw_expect_batman_version }}" ] && valid || invalid
+
+conn_count=`/usr/sbin/conntrack -C`
+conn_max=`sysctl -n net.nf_conntrack_max 2>/dev/null`
+conn_ratio=$(ratio "$conn_count" "$conn_max")
+
+echo -n -e "\e[39mConntrack: $conn_count of $conn_max in use ($conn_ratio%)\t\t\t\t"
+report_ratio "$conn_count" "$conn_max" {{ gw_check_conntrack_warn }} {{ gw_check_conntrack_max }}
+
+{% for r in served_regions %}
+dhcp_used=`kea-dhcp4-query {{ 100 + (r.region_index | int) }}`
+dhcp_total=`kea-dhcp4-query {{ 100 + (r.region_index | int) }} total`
+dhcp_ratio=$(ratio "$dhcp_used" "$dhcp_total")
+echo -n -e "\e[39m({{ '%-6s'|format(r.id) }}) DHCP: $dhcp_used of $dhcp_total leases assigned ($dhcp_ratio%)\t\t\t"
+report_ratio "$dhcp_used" "$dhcp_total" {{ gw_check_dhcp_warn }} {{ gw_check_dhcp_max }}
+
+{% endfor %}
+fastd_count=`pgrep -x "fastd" | wc -l`
+echo -n -e "\e[39mfastd: number of running instances $fastd_count\t\t\t\t"
+[ "$fastd_count" -eq {{ gw_expect_fastd_instances }} ] && valid || invalid
+
+# fastd instances may be configured but not started (no operator secrets yet),
+# so the socket directory can be empty on this gateway; the loop is skipped.
+SOCKETS=$(ls /var/run/fastd/*.sock 2>/dev/null || true)
+for f in $SOCKETS
+do
+    export FASTD_SOCKET=$f
+    conns=`fastd-query connections`
+    filename=$(basename "$f" | cut -d'.' -f2 | cut -d'-' -f1)
+    instancenr=$(basename "$f" | cut -d'.' -f2 | cut -d'-' -f2)
+    echo -n -e "\e[39m($filename) fastd: $conns connections to instance $instancenr\t\t\t"
+    report_ratio "$conns" 100 {{ gw_check_fastd_conn_warn }} {{ gw_check_fastd_conn_max }}
+done
+
+# Read the root filesystem by device name; `df <dev>` always works even when
+# the mount has moved, which a `df | grep <dev>` would mis-handle.
+read _ _ used avail _ _ _ < <(df -P {{ gw_check_hdd_device }} 2>/dev/null | sed -n 2p)
+usage=$(ratio "$used" "$avail")
+echo -n -e "\e[39mHDD: $used of $avail in use ($usage%)\t\t\t"
+report_ratio "$used" "$avail" {{ gw_check_hdd_warn }} 100
+
+echo -e "\e[39m"

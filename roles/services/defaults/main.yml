@@ -1,0 +1,33 @@
+---
+# Services for the Debian 13 gateway.
+
+# Time daemon backend (policy value lives in group_vars/all/main.yml):
+#   chrony  -> selected
+#   ntpsec  -> kept in the repo but de-selected (package purged, config unused)
+# The ntpsec template and the package tasks stay in this role so switching
+# back is a one-line change.
+ntp_conf: >-
+  {{ '/etc/chrony/chrony.conf' if ntp_backend == 'chrony'
+     else '/etc/ntpsec/ntp.conf' }}
+ntp_unit: >-
+  {{ 'chrony.service' if ntp_backend == 'chrony'
+     else 'ntpsec.service' }}
+ntp_package: >-
+  {{ 'chrony' if ntp_backend == 'chrony' else 'ntpsec' }}
+ntp_removed_package: >-
+  {{ 'ntpsec' if ntp_backend == 'chrony' else 'chrony' }}
+ntp_removed_unit: >-
+  {{ 'ntpsec.service' if ntp_backend == 'chrony'
+     else 'chrony.service' }}
+
+# --- /etc/resolv.conf ----------------------------------------------------
+# Local resolver first (it holds the ffhh zones), then public resolvers over
+# the uplink as a fallback.
+resolv_search: "hamburg.freifunk.net"
+resolv_fallback_nameservers:
+  - "9.9.9.9"
+  - "8.8.8.8"
+resolv_timeout: 2
+resolv_attempts: 1
+
+fail2ban_jail: /etc/fail2ban/jail.d/defaults-debian.conf

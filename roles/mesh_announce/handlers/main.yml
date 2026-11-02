@@ -1,0 +1,9 @@
+---
+- name: reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: restart mesh-announce
+  ansible.builtin.systemd:
+    name: "{{ mesh_announce_unit }}"
+    state: restarted

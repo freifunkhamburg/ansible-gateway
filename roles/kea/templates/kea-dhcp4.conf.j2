@@ -1,0 +1,88 @@
+{#
+  Kea 4 daemon config for the Debian 13 base.
+
+  Layout is one ():
+  memfile leases, one subnet per served region, this gateway's own region
+  address advertised as router and DNS, control socket for kea-ctl. Cleaned
+  of the old file's comment quirks. The static IP-reservation includes come
+  from the dhcp-static repository and are gated: while
+  kea_static_reservations_enabled is false the reservation checkout on gw05
+  is not provisioned, and Kea would refuse to load the <?include?> of a
+  missing file.
+#}
+{
+    "Dhcp4": {
+        "interfaces-config": {
+            "interfaces": [
+{% for r in served_regions %}
+                "{{ r.bat_if }}"{{ "," if not loop.last else "" }}
+{% endfor %}
+            ]
+        },
+
+        "lease-database": {
+            "type": "memfile",
+            "lfc-interval": 3600
+        },
+
+        "expired-leases-processing": {
+            "reclaim-timer-wait-time": 10,
+            "flush-reclaimed-timer-wait-time": 25,
+            "hold-reclaimed-time": 3600,
+            "max-reclaim-leases": 100,
+            "max-reclaim-time": 250,
+            "unwarned-reclaim-cycles": 5
+        },
+
+        "valid-lifetime": {{ kea_valid_lifetime }},
+
+        "subnet4": [
+{% for s in kea_subnet4 %}
+            {
+                "id": {{ s.subnet_id }},
+                "pools": [ { "pool": "{{ s.pool }}" } ],
+                "subnet": "{{ s.subnet }}",
+                "option-data": [
+                    {
+                        "name": "domain-name-servers",
+                        "data": "{{ s.dns }}"
+                    },
+                    {# RFC 2132 option 42: IPv4 addresses only (the ffhh NTP
+                       names have no A records), per subnet. #}
+                    {
+                        "name": "ntp-servers",
+                        "data": "{{ s.ntp_v4 | join(',') }}"
+                    },
+                    {
+                        "name": "routers",
+                        "data": "{{ s.dns }}"
+                    }
+                ]
+{% if kea_static_reservations_enabled | bool %}
+                ,<?include "{{ s.static_include }}"?>
+{% endif %}
+            }{{ "," if not loop.last else "" }}
+{% endfor %}
+        ],
+
+        "control-socket": {
+            "socket-type": "unix",
+            "socket-name": "/var/run/kea/kea-dhcp4.sock"
+        },
+
+        {# Kea 3.x moved logging from the top-level "Logging" section (the
+           Kea 3 layout) into Dhcp4.loggers (verified against
+           kea-dhcp4 3.0.5's config grammar). #}
+        "loggers": [
+            {
+                "name": "kea-dhcp4",
+                "output_options": [
+                    {
+                        "output": "syslog"
+                    }
+                ],
+                "severity": "WARN"
+            }
+        ]
+    }
+}

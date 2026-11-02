@@ -1,0 +1,8 @@
+---
+# Defaults can be overridden in group_vars/all; the release is deliberately
+# shared by every gateway.
+batman_release: v2026.3
+batman_build_dir: /opt/src
+batctl_path: /usr/local/sbin/batctl
+batman_compat_version: 15
+batman_module_dir: "/lib/modules/{{ ansible_kernel }}/updates/net/batman-adv"

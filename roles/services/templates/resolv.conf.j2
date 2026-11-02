@@ -1,0 +1,22 @@
+#
+# Managed by Ansible (roles/services). Do not edit by hand.
+#
+# Resolver order matters:
+#   1. the local resolver (knot by default, unbound when selected) on
+#      127.0.0.1 — it is the only resolver that knows the ffhh zones
+#      (node./knoten./router.ffhh, N.ntp.services.ffhh and the v4.N.* aliases,
+#      which are per-client-subnet data);
+#   2. public resolvers reachable through the uplink — glibc walks the
+#      nameserver list, so a public lookup still succeeds when the local
+#      resolver is not answering (connection refused / timeout).
+#
+# The shortened timeout/attempts keep a dead local resolver costing ~2 s
+# instead of the default 5 s per attempt. Consequence: while the local
+# resolver is down, ffhh-only names fail (they exist nowhere else) — that is
+# accepted.
+search {{ resolv_search }}
+nameserver 127.0.0.1
+{% for ns in resolv_fallback_nameservers %}
+nameserver {{ ns }}
+{% endfor %}
+options edns0 timeout:{{ resolv_timeout }} attempts:{{ resolv_attempts }}

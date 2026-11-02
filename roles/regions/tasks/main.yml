@@ -1,0 +1,239 @@
+---
+# Region composition and gateway-derived facts.
+#
+# Inputs: host_vars (gw_index, gw_regions, gateway addressing, pools) and
+# region_vars (subnets, numbering, tunnel ports, Kea blocks).
+#
+# Everything that follows from those inputs is derived here, so the inventory
+# holds only the address plan, never repetitions of it:
+#   - the gateway's address/MAC inside each served region
+#   - BGP peers and VXLAN bridge peers from the gateway registry
+#   - the uplink transit network (from uplink_v4 /29)
+#   - the published /32s (from gw_public_snat_range)
+#   - OSPF neighbours of the NBMA region (from region_vars)
+#   - the NTP server addresses advertised per region
+#   - the mesh-announce domains (from gw_regions)
+#   - check.sh expectations (transit peer, batman release, instance count)
+
+- name: Load region definitions
+  ansible.builtin.include_vars:
+    dir: "{{ region_vars_dir }}"
+
+- name: Assert the gateway ordinal is set
+  ansible.builtin.assert:
+    that:
+      - gw_index is defined
+      - gw_index | int > 0
+    fail_msg: "host_vars must set gw_index (the gateway ordinal)."
+
+- name: Assert every requested region has a definition
+  ansible.builtin.assert:
+    that:
+      - item in vars
+    fail_msg: "gw_regions lists '{{ item }}' but region_vars/{{ item }}.yml does not exist."
+  loop: "{{ gw_regions }}"
+
+- name: Initialise the region table
+  ansible.builtin.set_fact:
+    served_regions: []
+
+# ntp_v4: the region's three NTP servers are the gw01/gw02/gw03 addresses of
+# the same ordinal scheme; all three serve NTP on their bat interfaces.
+- name: Compose this gateway's address and MAC per served region
+  ansible.builtin.set_fact:
+    served_regions: >-
+      {{ served_regions + [
+           vars[item] | combine({
+             'bat_if':    'bat-' ~ item,
+             'v6_site':   vars[item].v6_prefix | site48,
+             'vxlan_id':  100 + (vars[item].region_index | int),
+             'v4':        vars[item].v4_net    | host_in(250 + gw_index | int),
+             'v4_host':   vars[item].v4_net    | host_in(250 + gw_index | int) | addr_only,
+             'v6':        vars[item].v6_prefix | host_in(gw_index | int * 16),
+             'v6_host':   vars[item].v6_prefix | host_in(gw_index | int * 16) | addr_only,
+             'ntp_v4':    [vars[item].v4_net | host_in(251) | addr_only,
+                           vars[item].v4_net | host_in(252) | addr_only,
+                           vars[item].v4_net | host_in(253) | addr_only],
+             'mac_prefix': gw_index | int | mac_prefix(vars[item].region_index)
+           })
+         ] }}
+  loop: "{{ gw_regions }}"
+
+- name: Assert the derived addresses fit the region subnets
+  ansible.builtin.assert:
+    that:
+      - served_regions[loop_index].v4_host | in_subnet(vars[gw_regions[loop_index]].v4_net)
+      - served_regions[loop_index].v6_host | in_subnet(vars[gw_regions[loop_index]].v6_prefix)
+    fail_msg: >-
+      {{ gw_regions[loop_index] }}: derived {{ served_regions[loop_index].v4_host }} /
+      {{ served_regions[loop_index].v6_host }} is outside the region subnet.
+  loop: "{{ gw_regions }}"
+  loop_control:
+    index_var: loop_index
+
+- name: Select the primary region
+  ansible.builtin.set_fact:
+    gateway_primary_region: "{{ gw_primary_region | default(gw_regions[0]) }}"
+
+- name: Assert the primary region is served
+  ansible.builtin.assert:
+    that:
+      - gateway_primary_region in (served_regions | map(attribute='id') | list)
+    fail_msg: "gw_primary_region '{{ gateway_primary_region }}' is not in gw_regions."
+
+# --- identity and BGP sources -----------------------------------------
+- name: Derive identity and BGP source addresses
+  ansible.builtin.set_fact:
+    router_id: "{{ intra_as_v4 | addr_only }}"
+    mesh_vxlan_local: "{{ intra_as_v4 | addr_only }}"
+    unbound_outgoing_v4: "{{ intra_as_v4 | addr_only }}"
+    unbound_outgoing_v6: "{{ intra_as_v6 | addr_only }}"
+    bird_bgp_source_v6: >-
+      {{ served_regions | selectattr('id', 'equalto', gateway_primary_region)
+         | map(attribute='v6_host') | first }}
+    bird_bgp_source_v4: >-
+      {{ served_regions | selectattr('ospf_nbma', 'equalto', true)
+         | map(attribute='v4_host') | first | default('') }}
+
+# --- peers, derived from the gateway registry -------------------------
+- name: Derive BGP peers from the gateway registry
+  ansible.builtin.set_fact:
+    bird_bgp_neighbors_v6: >-
+      {{ bird_bgp_neighbors_v6 | default([]) + [{
+           'name': 'ffhh_' ~ (g.host | replace('-', '_')),
+           'address': vars[gw_peer_region].v6_prefix | host_in(g.index | int * 16) | addr_only
+         }] }}
+  loop: "{{ gateways | selectattr('bgp_peer') | rejectattr('host', 'equalto', ffhh_host_name) | sort(attribute='index', reverse=True) }}"
+  loop_control:
+    loop_var: g
+
+- name: Derive VXLAN bridge peers from the gateway registry
+  ansible.builtin.set_fact:
+    mesh_vxlan_peers: >-
+      {{ (gateways | rejectattr('host', 'equalto', ffhh_host_name)
+          | map(attribute='host') | list)
+         | map('extract', hostvars, 'intra_as_v4')
+         | map('addr_only')
+         | sort }}
+
+- name: Assert peers exist
+  ansible.builtin.assert:
+    that:
+      - bird_bgp_neighbors_v6 | length > 0
+      - mesh_vxlan_peers | length > 0
+    fail_msg: "no peers in the gateway registry for {{ ffhh_host_name }}."
+
+# --- uplink and published addresses -----------------------------------
+# uplink_v4 is an address/prefix in the transit /29: the network is derived.
+# The published /32s are derived from the SNAT range.
+- name: Derive the uplink transit network and published /32s
+  ansible.builtin.set_fact:
+    gw_transit_net: "{{ uplink_v4 | net_only if uplink_v4 is defined else '' }}"
+    dummy_v4_addresses: "{{ gw_public_snat_range | snat_hosts if gw_public_snat_range is defined else [] }}"
+    uplink_addressed: "{{ uplink_v4 is defined and gw_public_snat_range is defined }}"
+
+- name: Assert the uplink address is inside its transit network
+  ansible.builtin.assert:
+    that:
+      - uplink_v4 is not defined or (uplink_v4 | addr_only | in_subnet(gw_transit_net))
+    fail_msg: "uplink_v4 {{ uplink_v4 }} is not inside the derived transit network {{ gw_transit_net }}."
+  when: uplink_v4 is defined
+
+# --- OSPF uplink networks ---------------------------------------------
+- name: Compose the OSPF uplink networks
+  ansible.builtin.set_fact:
+    ospf_v4_networks: >-
+      {{ ([gw_transit_net] if gw_transit_net else []) +
+         (served_regions | selectattr('ospf_nbma', 'equalto', true)
+          | map(attribute='v4_net') | list) }}
+
+- name: Derive the NBMA-region OSPF neighbours
+  ansible.builtin.set_fact:
+    gw_ospf_v4_neighbors: >-
+      {{ (served_regions | selectattr('ospf_nbma', 'equalto', true) | list
+          | first | default({})).ospf_neighbors_v4 | default([]) }}
+    gw_ospf_v6_neighbors: >-
+      {{ (served_regions | selectattr('ospf_nbma', 'equalto', true) | list
+          | first | default({})).ospf_neighbors_v6 | default([]) }}
+
+# --- expectations used by check.sh ------------------------------------
+- name: Derive operational expectations
+  ansible.builtin.set_fact:
+    gw_expect_gateway_v4: "{{ uplink_v4_peer | default('') }}"
+    gw_expect_batman_version: "{{ batman_release | regex_replace('^v', '') }}"
+    gw_expect_fastd_instances: >-
+      {{ served_regions | map('fastd_instances', gw_index | int) | flatten | length }}
+
+# --- DHCP (Kea) --------------------------------------------------------
+- name: Assert every served region has a DHCP pool
+  ansible.builtin.assert:
+    that:
+      - item in (gw_kea_pools | default({}))
+    fail_msg: >-
+      gw_kea_pools has no entry for '{{ item }}'; gateways of one region must
+      hand out disjoint /21 blocks.
+  loop: "{{ gw_regions }}"
+  when: gw_kea_pools is defined
+
+# Kea >= 2.1 requires a stable numeric subnet id; 100+region ordinal is
+# unique per region and stable across gateways.
+- name: Compose the Kea subnet table
+  ansible.builtin.set_fact:
+    kea_subnet4: >-
+      {{ kea_subnet4 | default([]) + [
+           item.kea | combine({
+             'subnet': item.v4_net,
+             'dns':  item.v4_host,
+             'ntp_v4': item.ntp_v4,
+             'pool': gw_kea_pools[item.id],
+             'subnet_id': 100 + (item.region_index | int)
+           })
+         ] }}
+  loop: "{{ served_regions }}"
+  when: gw_kea_pools is defined
+
+- name: Compose the Kea v6 interface order
+  ansible.builtin.set_fact:
+    kea_dhcp6_interfaces: >-
+      {{ served_regions | sort(attribute='dhcp6_index')
+         | map(attribute='bat_if') | list }}
+  when: gw_kea_pools is defined
+
+# DHCPv6 option 23 is a server list. Kea cannot vary option-data per
+# interface (INFO-REQUEST comes from a link-local source), so every address
+# must be reachable from all served regions.
+- name: Compose the DHCPv6 DNS self address
+  ansible.builtin.set_fact:
+    kea_dhcp6_dns_self: >-
+      {{ served_regions | selectattr('id', 'equalto', gateway_primary_region)
+         | map(attribute='v6_host') | first }}
+  when: gw_kea_pools is defined
+
+- name: Compose the DHCPv6 DNS server list (with peers)
+  ansible.builtin.set_fact:
+    kea_dhcp6_dns: >-
+      {{ ([kea_dhcp6_dns_self] + (kea_dhcp6_dns_peers | default([]))) | join(',') }}
+  when: gw_kea_pools is defined
+
+# --- reverse DNS zones ------------------------------------------------
+# The mesh reverse zones are answered by the community DNS; serving them
+# locally would require the client/host inventory.
+- name: Compose the mesh reverse zones
+  ansible.builtin.set_fact:
+    mesh_reverse_v4: "{{ mesh_v4_aggregate | reverse_zone }}"
+    mesh_reverse_v6: "{{ mesh_v6_aggregate | reverse_zone }}"
+
+# --- respondd domains --------------------------------------------------
+# One mesh-announce process serves every region this gateway carries; the
+# Gluon domain name comes from the region table.
+- name: Compose the mesh-announce domain list
+  ansible.builtin.set_fact:
+    mesh_announce_domains: >-
+      {{ mesh_announce_domains | default([]) + [{
+           'region': r.id,
+           'domain': r.gluon_domain,
+           'bat_if': r.bat_if
+         }] }}
+  loop: "{{ served_regions }}"
+  loop_control:
+    loop_var: r

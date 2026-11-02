@@ -1,0 +1,9 @@
+# BIRD 3.1.7 crashed (SIGSEGV) inside `birdc configure` when the OSPF
+# interface set changed (adding the uplink interface/network). A plain
+# `systemctl reload` therefore fails on that transition. Reconfigure as the
+# service does, and fall back to a restart so the new config is live either way.
+- name: reload bird
+  ansible.builtin.shell:
+    cmd: /usr/sbin/birdc configure || /usr/bin/systemctl restart bird
+    executable: /bin/bash
+  changed_when: true

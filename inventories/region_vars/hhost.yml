@@ -1,0 +1,21 @@
+# Freifunk Hamburg region: hhost.
+
+hhost:
+  id: hhost
+  interface_file: hh-ost
+  gluon_domain: ffhh_ost
+
+  region_index: 4
+  ospf_index: 1
+  dhcp6_index: 3
+
+  v4_net: "10.112.224.0/19"
+  v6_prefix: "2a03:2267:4::/64"
+  tunnel_slots:
+    - { port: 10009 }
+    - { port: 10010 }
+
+  ospf_nbma: false
+
+  kea:
+    static_include: "/var/lib/dhcp-static/static-ost.json"

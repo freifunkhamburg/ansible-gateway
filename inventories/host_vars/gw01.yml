@@ -1,0 +1,48 @@
+# gw01 — address reservation reference.
+#
+# Managed gateways are homogeneous: gw01 is listed so that mesh peers,
+# VXLAN bridge peers and the region/IP allocation are derivable. It is not
+# provisioned by this automation (the existing gateway stays untouched);
+# only the values below are recorded as the reserved address plan.
+
+gw_index: 1
+ffhh_host_name: gw01
+
+gw_primary_region: hhsued
+gw_regions:
+  - hhsued
+  - hhwest
+  - hhnowe
+  - hhost
+
+# --- intra-as / uplink ------------------------------------------------
+intra_as_v4: "193.96.224.227/29"
+intra_as_v4_gw: "193.96.224.225"
+intra_as_v6: "2a03:2267:ffff:c00::1000/64"
+intra_as_v6_gw: "2a03:2267:ffff:c00::1"
+
+uplink_v4: "100.64.112.251/29"
+uplink_v4_peer: "100.64.112.249"
+
+# --- published block --------------------------------------------------
+gw_public_net: "193.96.224.0/24"
+gw_public_snat_range: "193.96.224.72-193.96.224.79"
+
+# --- DHCP pools (slot 2 of each region /19) ---------------------------
+gw_kea_pools:
+  hhsued: "10.112.72.1-10.112.79.254"
+  hhwest: "10.112.104.1-10.112.111.254"
+  hhnowe: "10.112.200.1-10.112.207.254"
+  hhost: "10.112.232.1-10.112.239.254"
+
+# --- firewall ---------------------------------------------------------
+gw_ssh_allowlist:
+  - "10.0.0.0/8"
+  - "49.12.225.141/32"
+  - "80.252.100.112/29"
+  - "168.119.77.189/32"
+  - "185.161.130.64/28"
+  - "193.96.224.128/25"
+  - "212.12.38.182/32"
+  - "212.12.51.134/32"
+  - "213.128.138.160/29"

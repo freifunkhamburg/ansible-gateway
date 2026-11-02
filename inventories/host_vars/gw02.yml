@@ -1,0 +1,9 @@
+# gw02 — address reservation reference.
+#
+# Only the intra-as address is recorded: it is needed to derive the VXLAN
+# bridge peer list of the other gateways. No other address plan is recorded.
+
+gw_index: 2
+ffhh_host_name: gw02
+
+intra_as_v4: "193.96.224.241/29"

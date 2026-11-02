@@ -1,0 +1,27 @@
+#!/bin/bash
+# Common dispatcher, unchanged from the reference implementation.
+
+source $1
+
+case $2 in
+  pull)
+    if [ "x$(type -t pull)" == 'xfunction' ] ; then
+      shift
+      pull $@
+    else
+      cd "$REPOSITORY"
+      git pull -q
+    fi
+    ;;
+  reload)
+    if [ "x$(type -t reload)" == 'xfunction' ] ; then
+      shift
+      reload $@
+    else
+      echo "Nothing to do."
+    fi
+    ;;
+  *)
+    echo "Usage: $(basename "$1") [pull|reload|help]"
+    ;;
+esac

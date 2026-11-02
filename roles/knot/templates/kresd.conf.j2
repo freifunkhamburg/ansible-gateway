@@ -1,0 +1,180 @@
+{#
+  Knot Resolver, client-facing resolver on port {{ knot_port }}.
+
+  Parity with the unbound setup:
+
+    ACL (unbound access-control allow/refuse)
+      -> one policy rule that inspects req.qsource.addr and REFUSEs anything
+         not in the allow list. It is added first so no zone rule runs for an
+         unauthorised client.
+
+    node/knoten/router + NTP names (local-zone redirect + access-control tags)
+      -> per-region authoritative answers, limited to the region subnets.
+         Specific subdomains (v4.N.ntp.services.ffhh) are registered before
+         their parent (N.ntp.services.ffhh).
+
+    domain-insecure "ffhh"
+      -> policy.FLAGS({'DNSSEC_INSECURE'}) on ffhh.
+
+    forward-zone "ffhh" / "112.10.in-addr.arpa"
+      -> policy.FORWARD(<community DNS>).
+
+  Not replicated: chroot and outgoing-interface pinning.
+  The firewall and the ACL carry access control.
+#}
+local ffi = require('ffi')
+
+net.listen('127.0.0.1', {{ knot_port }}, { kind = 'dns' })
+net.listen('::1', {{ knot_port }}, { kind = 'dns', freebind = true })
+{% for r in served_regions %}
+net.listen('{{ r.v4_host }}', {{ knot_port }}, { kind = 'dns' })
+{% endfor %}
+{% for r in served_regions %}
+net.listen('{{ r.v6_host }}', {{ knot_port }}, { kind = 'dns', freebind = true })
+{% endfor %}
+
+modules = { 'hints > iterate', 'stats', 'view' }
+-- Cache on tmpfs (/run/knot-resolver, created by the unit's RuntimeDirectory).
+-- Knot Resolver 6 always uses LMDB; pointing it at tmpfs keeps the cache
+-- non-persistent, so stale negative entries cannot survive a restart or a
+-- config change. Set storage before size: assigning size first would open the
+-- default LMDB location in the workdir.
+cache.storage = '{{ knot_cache_dir }}'
+cache.size = {{ knot_cache_mb }} * MB
+
+-- ---------- ACL ---------------------------------------------------------
+local function subnet_match(addr, subnet)
+    local cd = ffi.new('char[16]')
+    local family = ffi.C.kr_straddr_family(subnet)
+    local bitlen = ffi.C.kr_straddr_subnet(cd, subnet)
+    if bitlen < 0 then return false end
+    return family == addr:family() and ffi.C.kr_bitcmp(cd, addr:ip(), bitlen) == 0
+end
+
+local allow = {
+{% for a in unbound_access_control if a.action == 'allow' %}
+    '{{ a.net }}',
+{% endfor %}
+}
+
+-- policy.add() callbacks get (request, query) and return an *action*; the
+-- action is then invoked as action(state, request). So the ACL rule returns
+-- policy.REFUSE (or nil to keep iterating).
+policy.add(function(req, query)
+    local addr = req.qsource.addr
+    if addr == nil then return nil end          -- internal request
+    for _, net in ipairs(allow) do
+        if subnet_match(addr, net) then return nil end
+    end
+    return policy.REFUSE
+end)
+
+-- ---------- local zones (per region) -----------------------------------
+local viewmod = view
+
+local function rrset(atype, values)
+    local lines = {}
+    for _, v in ipairs(values) do
+        lines[#lines + 1] = atype .. ' ' .. v
+    end
+    return { ttl = 3600, rdata = kres.parse_rdata(lines) }
+end
+
+local function answer_for(tbl)
+    return function(state, req)
+        local qry = req:current()
+        local answer = req:ensure_answer()
+        if answer == nil then return nil end
+        ffi.C.kr_pkt_make_auth_header(answer)
+        answer:rcode(kres.rcode.NOERROR)
+        local set = tbl[qry.stype]
+        if set ~= nil then
+            answer:begin(kres.section.ANSWER)
+            if type(set.rdata) == 'table' then
+                for _, r in ipairs(set.rdata) do
+                    answer:put(qry.sname, set.ttl, answer:qclass(), qry.stype, r)
+                end
+            else
+                answer:put(qry.sname, set.ttl, answer:qclass(), qry.stype, set.rdata)
+            end
+        end
+        return kres.DONE
+    end
+end
+
+local regions = {
+{% for r in served_regions %}
+    {
+        subnets = { '{{ r.v4_net }}', '{{ r.v6_site }}' },
+        gw4 = '{{ r.v4_net | host_in(1) | addr_only }}',
+        gw6 = '{{ r.v6_prefix | host_in(1) | addr_only }}',
+        ntp6 = {
+            '{{ r.v6_prefix | host_in(16) | addr_only }}',
+            '{{ r.v6_prefix | host_in(32) | addr_only }}',
+            '{{ r.v6_prefix | host_in(48) | addr_only }}',
+        },
+        ntp4 = {
+            '{{ r.ntp_v4[0] }}',
+            '{{ r.ntp_v4[1] }}',
+            '{{ r.ntp_v4[2] }}',
+        },
+    },
+{% endfor %}
+}
+
+local function src_action(subnet, action)
+    local match = viewmod.rule_src(action, subnet)
+    return function(state, req)
+        local a = match(req)
+        if a ~= nil then return a(state, req) end
+        return nil
+    end
+end
+
+for _, r in ipairs(regions) do
+    local zones = {
+        { 'v4.1.ntp.services.ffhh', { [kres.type.A] = rrset('A', {r.ntp4[1]}) } },
+        { 'v4.2.ntp.services.ffhh', { [kres.type.A] = rrset('A', {r.ntp4[2]}) } },
+        { 'v4.3.ntp.services.ffhh', { [kres.type.A] = rrset('A', {r.ntp4[3]}) } },
+        { '1.ntp.services.ffhh',    { [kres.type.AAAA] = rrset('AAAA', {r.ntp6[1]}) } },
+        { '2.ntp.services.ffhh',    { [kres.type.AAAA] = rrset('AAAA', {r.ntp6[2]}) } },
+        { '3.ntp.services.ffhh',    { [kres.type.AAAA] = rrset('AAAA', {r.ntp6[3]}) } },
+        { 'node.ffhh',              { [kres.type.A] = rrset('A', {r.gw4}),
+                                      [kres.type.AAAA] = rrset('AAAA', {r.gw6}) } },
+        { 'knoten.ffhh',            { [kres.type.A] = rrset('A', {r.gw4}),
+                                      [kres.type.AAAA] = rrset('AAAA', {r.gw6}) } },
+        { 'router.ffhh',            { [kres.type.A] = rrset('A', {r.gw4}),
+                                      [kres.type.AAAA] = rrset('AAAA', {r.gw6}) } },
+    }
+    for _, z in ipairs(zones) do
+        local zone, tbl = z[1], z[2]
+        local action = answer_for(tbl)
+        for _, subnet in ipairs(r.subnets) do
+            policy.add(policy.suffix(src_action(subnet, action), {todname(zone)}))
+        end
+    end
+end
+
+-- ---------- ffhh zones ------------------------------------------------
+policy.add(policy.suffix(policy.FLAGS({'DNSSEC_INSECURE'}), {todname('ffhh')}))
+policy.add(policy.suffix(policy.FORWARD('{{ knot_upstream_ffhh }}'), {todname('ffhh')}))
+-- Mesh reverse zones are forwarded to the community DNS and marked
+-- insecure.  Two kresd quirks have to be neutralised here:
+--
+-- 1. DNSSEC: the /32 reverse delegation (7.6.2.2.3.0.a.2.ip6.arpa) has no
+--    DS in the RIPE parent 0.a.2.ip6.arpa, so it is an insecure delegation.
+--    kresd recursion still fails: the /64 reverse zones are delegated to
+--    srv03.hamburg.freifunk.net, an auth-only PTR responder (no SOA/NS
+--    records) that kresd treats as a lame delegation.  Forwarding +
+--    DNSSEC_INSECURE sidesteps both.
+--
+-- 2. 0x20 case randomisation: kresd randomises the case of the QNAME it
+--    sends upstream (e.g. "...A.2.IP6.aRpA.").  The community DNS forwards
+--    that mixed-case name to its case-sensitive backend, which answers
+--    NXDOMAIN unless the name happens to be cached.  NO_0X20 keeps the
+--    forwarded queries all-lowercase, matching what unbound sends.
+{% for z in [mesh_reverse_v4, mesh_reverse_v6] %}
+policy.add(policy.suffix(policy.FLAGS('NO_0X20'), {todname('{{ z }}')}))
+policy.add(policy.suffix(policy.FLAGS({'DNSSEC_INSECURE'}), {todname('{{ z }}')}))
+policy.add(policy.suffix(policy.FORWARD('{{ knot_upstream_ffhh }}'), {todname('{{ z }}')}))
+{% endfor %}

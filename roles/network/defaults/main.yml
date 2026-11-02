@@ -1,0 +1,2 @@
+---
+# No defaults: every value comes from host_vars / group_vars.

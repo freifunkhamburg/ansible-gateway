@@ -1,0 +1,40 @@
+---
+# batctl, built from the Open-Mesh git tag.
+
+- name: Fetch batctl source at the pinned release
+  ansible.builtin.git:
+    repo: "https://git.open-mesh.org/batctl.git"
+    dest: "{{ batman_build_dir }}/batctl"
+    version: "{{ batctl_commit | default(batman_release) }}"
+    update: true
+
+- name: Build batctl
+  ansible.builtin.command:
+    cmd: make -j{{ ansible_processor_vcpus | default(2) }}
+    chdir: "{{ batman_build_dir }}/batctl"
+    creates: "{{ batman_build_dir }}/batctl/batctl"
+
+- name: Install batctl
+  ansible.builtin.copy:
+    src: "{{ batman_build_dir }}/batctl/batctl"
+    dest: "{{ batctl_path }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Read the installed batctl version
+  ansible.builtin.command:
+    cmd: "{{ batctl_path }} -v"
+  register: batctl_version
+  changed_when: false
+  check_mode: false
+
+- name: Assert the batctl version matches the release
+  ansible.builtin.assert:
+    that:
+      - "'batctl ' ~ (batman_release | regex_replace('^v', '')) in batctl_version.stdout"
+    fail_msg: >-
+      {{ batctl_path }} reports {{ batctl_version.stdout }}; expected
+      {{ batman_release | regex_replace('^v', '') }}.
+    quiet: true

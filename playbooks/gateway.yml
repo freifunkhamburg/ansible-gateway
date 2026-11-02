@@ -1,0 +1,38 @@
+---
+# ======================================================================
+# Build a Debian 13 gateway to its full configured state in ONE run.
+#
+# This is the production entry point. The old per-step playbooks were
+# build-out scaffolding; ordering is now encoded in the role order below.
+# Steps are only needed when debugging a single layer, and can be run by
+# selecting roles on the command line.
+#
+#   ansible-playbook playbooks/gateway.yml --check --diff    # preview
+#   ansible-playbook playbooks/gateway.yml                   # apply
+#
+# fastd peer secrets are operator-supplied (vault). Without them the role
+# renders the configuration but does not start instances; enable them with
+#   -e fastd_start=true --ask-vault-pass
+#
+# The run is idempotent: DNS/knot, Kea, BIRD, firewall and the build roles
+# only change when their inputs or upstream releases change.
+# ======================================================================
+- name: Configure gateway
+  hosts: gw05
+  become: true
+  gather_facts: true
+  roles:
+    - base          # Debian 13 assertion, sysctl
+    - regions       # derived addresses, peers, pools, expectations
+    - network       # NIC names, uplink/intra-as, dummy0
+    - mesh          # batman-adv + batctl + bat/VXLAN interfaces
+    - data_sync     # dhcp-static checkout (before Kea reservations)
+    - kea           # DHCPv4 + DHCPv6
+    - bird          # OSPF/BGP/static routes
+    - services      # resolver, time, vnstat, fail2ban
+    - knot          # client-facing Knot Resolver (build dependency)
+    - fastd         # tunnels (start requires secrets)
+    - ssh           # hardening + administrator keys
+    - operations    # health scripts, cron, vnstat interface policy
+    - mesh_announce # respondd
+    - firewall      # last: render and apply the ruleset

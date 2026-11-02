@@ -1,0 +1,8 @@
+---
+# Same default as roles/regions; group_vars can override.
+region_vars_dir: "{{ playbook_dir }}/../inventories/region_vars"
+
+# Extra DNS servers advertised in DHCPv6 option 23, after the gateway's own
+# primary-region address. Must be reachable from every served region (the
+# option is global, not per interface), i.e. other gateways' region addresses.
+kea_dhcp6_dns_peers: []

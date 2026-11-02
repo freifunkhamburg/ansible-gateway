@@ -1,0 +1,77 @@
+#!/bin/bash
+# Gateway health/state checker. batman-adv since 2024 removed the
+# /sys/class/net/<if>/mesh sysfs tree; the gateway mode is read and set
+# through `batctl meshif <if> gw`. Systemd unit names replace `service`.
+
+set -u
+
+# cron runs with a minimal PATH; batctl is installed in /usr/local/sbin.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+. /etc/ffnord
+
+MAINTENANCE=${MAINTENANCE:-0}
+BATCTL=$(command -v batctl)
+
+if [[ -z "$BATCTL" || ! -x "$BATCTL" ]]; then
+    logger "check-gateway: batctl not found; gateway mode not checked"
+    exit 1
+fi
+
+if test $MAINTENANCE -eq 0; then
+
+    # ensure the fwmark 0x1 rule exists (gateway control traffic -> mesh)
+    /sbin/ip rule | grep 32000 >/dev/null 2>&1
+    if [[ $? -ne 0 ]]; then
+        /sbin/ip rule add from all fwmark 0x1 table 42 preference 32000
+    fi
+
+    ping -q -m 1 -I "$GW_LOCAL_IP" -c 4 -i 1 -W 5 "$GW_CONTROL_IP" >/dev/null 2>&1
+
+    if test $? -eq 0; then
+        NEW_STATE=server
+    else
+        NEW_STATE=off
+    fi
+
+else
+    NEW_STATE=off
+fi
+
+for IF in $(ls /sys/class/net | grep '^bat-'); do
+    OLD_STATE=$("$BATCTL" meshif "$IF" gw 2>/dev/null | awk '{print $1}')
+    if [[ -z "$OLD_STATE" ]]; then
+        logger "check-gateway: cannot read gateway mode on $IF; skipping"
+        continue
+    fi
+    [ "$OLD_STATE" == "$NEW_STATE" ] && continue
+
+    if ! "$BATCTL" meshif "$IF" gw "$NEW_STATE" >/dev/null 2>&1; then
+        logger "check-gateway: failed to set gateway mode $NEW_STATE on $IF"
+        continue
+    fi
+    logger "batman gateway mode changed to $NEW_STATE on $IF"
+
+    if [ "$NEW_STATE" == "off" ]; then
+        /bin/systemctl stop {{ kea_unit }}
+        /bin/systemctl disable {{ kea_unit }}
+    fi
+
+    if [ "$NEW_STATE" == "server" ]; then
+        /bin/systemctl enable {{ kea_unit }}
+        /bin/systemctl start {{ kea_unit }}
+    fi
+done
+
+if [ "$NEW_STATE" == "server" ]; then
+    /bin/systemctl is-active {{ kea_unit }} >/dev/null 2>&1
+    if [[ $? -ne 0 ]]; then
+        /bin/systemctl restart {{ kea_unit }}
+    fi
+fi
+if [ "$NEW_STATE" == "off" ]; then
+    /bin/systemctl is-active {{ kea_unit }} >/dev/null 2>&1
+    if [[ $? -eq 0 ]]; then
+        /bin/systemctl stop {{ kea_unit }}
+    fi
+fi

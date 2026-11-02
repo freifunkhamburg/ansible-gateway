@@ -1,0 +1,79 @@
+---
+# Step 3: BIRD routing: BIRD 3 (single daemon, v4+v6 channels).
+#
+# The reference config is BIRD 1.6 split into bird.conf (v4) and bird6.conf (v6).
+# BIRD 3 cannot run two daemons and tables are per AFI, so the same protocols
+# are expressed once with ipv4/ipv6 channels and distinct table names
+# (mesh4/mesh6, kmain4/kmain6, mesh_ffhh4/mesh_ffhh6).
+
+
+- name: Install BIRD 3
+  ansible.builtin.package:
+    name: bird3
+    state: present
+
+- name: Ensure BIRD config directory
+  ansible.builtin.file:
+    path: /etc/bird
+    state: directory
+    owner: bird
+    group: bird
+    mode: "0750"
+
+- name: Render /etc/bird/bird.conf
+  ansible.builtin.template:
+    src: bird.conf.j2
+    dest: /etc/bird/bird.conf
+    owner: root
+    group: bird
+    mode: "0640"
+  notify: reload bird
+
+# Parse-only check: the service's own ExecStartPre also parses the config, but
+# failing here gives a clear error before anything is reloaded.
+- name: Validate configuration with bird -p
+  ansible.builtin.command: /usr/sbin/bird -p -c /etc/bird/bird.conf
+  register: bird_parse
+  changed_when: false
+
+- name: Enable and start BIRD
+  ansible.builtin.service:
+    name: bird
+    state: started
+    enabled: true
+
+# Run the pending reload handler first, so the report below shows the state
+# after the new configuration was applied.
+- name: Apply the pending configuration reload
+  ansible.builtin.meta: flush_handlers
+
+- name: Show protocol state
+  ansible.builtin.command: /usr/sbin/birdc show protocols
+  register: bird_protocols
+  changed_when: false
+  failed_when: false
+
+- name: Report BIRD protocols
+  ansible.builtin.debug:
+    var: bird_protocols.stdout_lines
+
+- name: Show OSPF neighbours
+  ansible.builtin.command: /usr/sbin/birdc show ospf neighbors
+  register: ospf_neighbours
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Report OSPF neighbours
+  ansible.builtin.debug:
+    var: ospf_neighbours.stdout_lines
+
+- name: Assert the uplink OSPF adjacency is full when the uplink is addressed
+  ansible.builtin.assert:
+    that: "'Full/' in ospf_neighbours.stdout"
+    fail_msg: >-
+      no Full OSPF adjacency yet; the upstream router is
+      {{ uplink_v4_peer }}. If the session is still Init/ExStart, give it a
+      hello interval and re-run.
+    quiet: true
+  when: uplink_addressed and not ansible_check_mode

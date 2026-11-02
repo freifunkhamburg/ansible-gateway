@@ -1,0 +1,60 @@
+---
+# Verify components that are not plain Debian apt packages against upstream.
+#
+# The checker and its catalog are installed by roles/operations (the
+# production run), so this playbook only runs and reports them. Run it after
+# playbooks/gateway.yml.
+#
+#   ansible-playbook playbooks/gateway-check-upstreams.yml
+#   ansible-playbook playbooks/gateway-check-upstreams.yml \
+#       -e upstream_check_fail_on_outdated=true
+#
+# Exit state: the play succeeds when the check ran; with
+# upstream_check_fail_on_outdated=true it fails when a component is behind
+# upstream. A failed check (network) always fails the assert.
+- name: Check built components against upstream releases
+  hosts: gw05
+  become: true
+  gather_facts: true
+  vars:
+    upstream_check_bin: /usr/local/bin/check-upstream-versions
+    upstream_check_catalog: /usr/local/share/check-upstream-versions.yml
+  tasks:
+    - name: Assert the checker is installed (roles/operations installs it)
+      ansible.builtin.stat:
+        path: "{{ upstream_check_bin }}"
+      register: upstream_bin
+      changed_when: false
+
+    - name: Fail when the checker is not installed
+      ansible.builtin.assert:
+        that: upstream_bin.stat.exists
+        fail_msg: >-
+          {{ upstream_check_bin }} is missing; run playbooks/gateway.yml first
+          (roles/operations installs the checker and its catalog).
+
+    - name: Run the checker
+      ansible.builtin.command:
+        cmd: "{{ upstream_check_bin }} --catalog {{ upstream_check_catalog }}"
+      register: upstream_check
+      changed_when: false
+      failed_when: false
+
+    - name: Show the result
+      ansible.builtin.debug:
+        var: upstream_check.stdout_lines
+
+    - name: Fail when a check could not be completed
+      ansible.builtin.assert:
+        that: upstream_check.rc != 2
+        fail_msg: >-
+          rc={{ upstream_check.rc }}: at least one version check could not be
+          completed (upstream unreachable or installed version unreadable).
+
+    - name: Fail when a component is behind upstream
+      ansible.builtin.assert:
+        that: upstream_check.rc == 0
+        fail_msg: >-
+          rc={{ upstream_check.rc }}: built component(s) behind upstream;
+          run playbooks/gateway.yml to rebuild.
+      when: upstream_check_fail_on_outdated | default(false)

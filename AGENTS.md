@@ -29,13 +29,29 @@ template dialects, or compatibility paths for older hosts.
 `gw01`–`gw04` are inventory entries kept for address/pool reservations and peer
 derivation. Do not apply the automation to them; `gw05` is the managed host.
 
-## 2. One run
+## 2. Branch workflow: develop on branches, squash-merge when working
+
+`main` is the deployable state of the gateways: every commit on it is proven,
+and applying `main` to gw05 must always be safe. Therefore:
+
+- New features and risky changes start from `main` on a branch
+  (`feature/<topic>`, `fix/<topic>`); commit freely there.
+- Before merging, the branch must pass against the live host:
+  `.venv-ansible/bin/ansible-playbook playbooks/gateway.yml -l gw05 --check --diff`
+  shows intended changes only, no drift left unexplained.
+- Merge with `git merge --squash feature/<topic>` into `main` (one commit per
+  feature; branch may be deleted afterwards), push `origin main`.
+- Small, obvious fixes (docs, comments, typos) may go straight to `main`.
+- Publish to GitHub only on explicit request (see §0); squash `main` into a
+  single commit unless leo asks for full history.
+
+## 3. One run
 
 `playbooks/gateway.yml` is the production entry point. It is idempotent and
 brings a fresh host to its full state. Do not reintroduce numbered step
 playbooks; role order encodes dependencies. Use `--check --diff` first.
 
-## 3. Inventory rule
+## 4. Inventory rule
 
 The inventory stores **inputs only**. Derived values belong in
 `roles/regions`, not in host/group vars: region addresses, BGP/VXLAN peers,
@@ -49,7 +65,7 @@ per gateway (address plan, pools, allowlists, admin keys, NIC MACs) belongs in
 `host_vars`. A value that differs per region (subnet, numbering, tunnel ports,
 Kea block, Gluon domain) belongs in `region_vars`.
 
-## 4. Connection facts
+## 5. Connection facts
 
 - `ssh -i /projects/.ssh/id_ed25519_ffhh_gw leo@193.96.224.213` for gw05.
 - `leo` needs a password for full sudo; Ansible `become` needs
@@ -57,7 +73,7 @@ Kea block, Gluon domain) belongs in `region_vars`.
 - `~/.ssh` is not persistent here; the key lives in `/projects/.ssh`.
 - Do not probe hosts with raw TCP scans or bypass the egress proxy.
 
-## 5. Secrets and destructive changes
+## 6. Secrets and destructive changes
 
 - Operator secrets (fastd keys) come from an ansible-vault kept in the private
   `leo/ffhh-gw-vault` repo (symlinked to `inventories/group_vars/all/vault.yml`,
@@ -68,7 +84,7 @@ Kea block, Gluon domain) belongs in `region_vars`.
 - BIRD reloads, service restarts and interface renames are expected parts of
   the run; keep every task idempotent.
 
-## 6. Network access
+## 7. Network access
 
 The workspace uses an allowlist proxy. Source downloads and data clones happen
 on the target, not on the controller. If controller-side access is needed and

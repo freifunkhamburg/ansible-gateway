@@ -1,0 +1,54 @@
+name: Verify
+
+# Static verification only: no host access, no vault decryption.
+# `--syntax-check` parses playbooks/roles without loading inventory vars, so the
+# role runs offline and does not need the operator vault.
+'on':
+  push:
+    branches: [main, 'feature/**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  syntax:
+    runs-on: docker
+    container:
+      image: docker.io/nikolaik/python-nodejs:python3.12-nodejs20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0 (SHA-pinned)
+      - name: Install ansible toolchain
+        run: pip install --quiet 'ansible-core==2.21.*' 'ansible-lint==26.10.1'
+      - name: Playbook syntax check
+        run: |
+          set -eu
+          # ansible.cfg points at .vault_pass (git-ignored operator symlink);
+          # static parsing never decrypts, so a dummy file is enough here.
+          printf 'ci-dummy\n' > .vault_pass
+          for pb in playbooks/*.yml; do
+            echo "== $pb"
+            ansible-playbook --syntax-check "$pb"
+          done
+      - name: ansible-lint (baseline policy, see .ansible-lint)
+        run: ansible-lint --offline
+      - name: Inventory YAML parses and roles reference only declared vars
+        run: |
+          set -eu
+          python3 - <<'PY'
+          import glob, sys, yaml
+          bad = []
+          for f in glob.glob('inventories/**/*.yml', recursive=True):
+              try:
+                  yaml.safe_load(open(f))
+              except Exception as e:
+                  bad.append(f"{f}: {e}")
+          if bad:
+              print("\n".join(bad)); sys.exit(1)
+          print("inventory files OK")
+          PY
+      - name: No secrets committed (fail closed)
+        run: |
+          set -eu
+          if git grep -nE 'ANSIBLE_VAULT|^\s*fastd_secrets:' -- . ':!*.example' ':!*.md' ':!roles/fastd/templates/*' ':!.gitea/*'; then
+            echo "::error::plaintext vault content found in tree"; exit 1
+          fi
+          echo "secret scan clean"

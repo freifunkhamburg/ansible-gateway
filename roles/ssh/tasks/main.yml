@@ -52,7 +52,7 @@
     label: "{{ item.0 }} {{ item.1.split(' ')[1][:16] }}…"
 
 - name: Flush handlers so the sshd policy is live before finishing
-  meta: flush_handlers
+  ansible.builtin.meta: flush_handlers
 
 - name: Report the effective authentication policy
   ansible.builtin.command: sshd -T

@@ -61,6 +61,23 @@ OPT_ORO = 6
 OPT_DNS = 23
 OPT_INFO_REFRESH = 32
 
+
+# --- DHCPv4 (RFC 2131) ---------------------------------------------------
+D4_MSG_DISCOVER, D4_MSG_OFFER = 1, 2
+D4_MSG_REQUEST, D4_MSG_ACK, D4_MSG_RELEASE = 3, 5, 7
+D4_OPT_MSG_TYPE = 53
+D4_OPT_REQUESTED_IP = 50
+D4_OPT_LEASE_TIME = 51
+D4_OPT_SUBNET_MASK = 1
+D4_OPT_ROUTER = 3
+D4_OPT_DNS = 6
+D4_OPT_SERVER_ID = 54
+D4_OPT_PARAM_LIST = 55
+D4_OPT_CLIENT_ID = 61
+D4_SERVER_PORT = 67
+D4_CLIENT_PORT = 68
+D4_MAGIC = bytes([0x63, 0x82, 0x53, 0x63])
+
 PASS, FAIL, SKIP, WARN = "pass", "fail", "skip", "warn"
 
 
@@ -295,6 +312,135 @@ def dhcp6_info(ifname, timeout=6):
     return replies
 
 
+
+
+def _dhcp4_frame(xid, msg_type, ciaddr=b"\x00\x00\x00\x00",
+                 extra=b"", hwaddr=b"\x00" * 6):
+    """Build a BOOTREQUEST frame (236-byte header + magic cookie + options)."""
+    return (struct.pack("!BBBBIHH", 1, 1, 6, 0, xid, 0, 0x8000)
+            + ciaddr
+            + b"\x00" * 12            # yiaddr, siaddr, giaddr
+            + hwaddr + b"\x00" * 10   # chaddr (16 bytes)
+            + b"\x00" * 64            # sname
+            + b"\x00" * 128           # file
+            + D4_MAGIC
+            + bytes([D4_OPT_MSG_TYPE, 1, msg_type])
+            + extra
+            + bytes([255]))
+
+
+def _dhcp4_options(data):
+    opts = {}
+    i = 240
+    while i < len(data):
+        code = data[i]
+        if code == 0:
+            i += 1
+            continue
+        if code == 255 or i + 1 >= len(data):
+            break
+        length = data[i + 1]
+        opts[code] = data[i + 2:i + 2 + length]
+        i += 2 + length
+    return opts
+
+
+def dhcp4_lease(ifname, timeout=6, unicast=None):
+    """Acquire a DHCPv4 lease and release it again.
+
+    Returns a dict with yiaddr/server/router/dns/lease_time, or raises.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, ifname.encode())
+    try:
+        sock.bind(("0.0.0.0", D4_CLIENT_PORT))
+    except PermissionError as e:
+        sock.close()
+        raise PermissionError(f"binding UDP/68 needs root ({e})") from e
+    except OSError as e:
+        sock.close()
+        raise PermissionError(f"could not bind UDP/68: {e}") from e
+    try:
+        xid = random.randint(0, 0xFFFFFFFF)
+        mac = open(f"/sys/class/net/{ifname}/address").read().strip()
+        hwaddr = bytes(int(x, 16) for x in mac.split(":"))
+        client_id = bytes([D4_OPT_CLIENT_ID, len(hwaddr) + 1, 1]) + hwaddr
+        params = client_id + bytes([D4_OPT_PARAM_LIST, 8,
+                        D4_OPT_SUBNET_MASK, D4_OPT_ROUTER, D4_OPT_DNS,
+                        D4_OPT_LEASE_TIME, D4_OPT_SERVER_ID, 42, 58, 59])
+        sock.settimeout(1.0)
+
+        def exchange(frame, want_type, window):
+            # Kea binds per-interface rather than to INADDR_ANY, so limited
+            # broadcast is not always delivered; try broadcast first, then the
+            # gateway's unicast address (RFC 2131 allows unicast to a known
+            # server address).
+            targets = [("255.255.255.255", D4_SERVER_PORT)]
+            if unicast:
+                targets.append((unicast, D4_SERVER_PORT))
+            for t in targets:
+                try:
+                    sock.sendto(frame, t)
+                except OSError:
+                    pass
+            deadline = time.time() + window
+            while time.time() < deadline:
+                try:
+                    data, _ = sock.recvfrom(2048)
+                except socket.timeout:
+                    continue
+                if len(data) < 240 or data[0] != 2:
+                    continue
+                rxid = struct.unpack("!I", data[4:8])[0]
+                if rxid != xid:
+                    continue
+                opts = _dhcp4_options(data)
+                if opts.get(D4_OPT_MSG_TYPE, b"\x00")[0] != want_type:
+                    continue
+                return socket.inet_ntoa(data[16:20]), opts
+            return None, {}
+
+        yiaddr, opts = exchange(_dhcp4_frame(xid, D4_MSG_DISCOVER, extra=params,
+                                             hwaddr=hwaddr),
+                                D4_MSG_OFFER, timeout)
+        if not yiaddr:
+            raise RuntimeError("no DHCPOFFER received")
+        server_id = opts.get(D4_OPT_SERVER_ID, b"")
+        req = (bytes([D4_OPT_REQUESTED_IP, 4]) + socket.inet_aton(yiaddr)
+               + (bytes([D4_OPT_SERVER_ID, len(server_id)]) + server_id if server_id else b""))
+        yiaddr2, ack = exchange(_dhcp4_frame(xid, D4_MSG_REQUEST, extra=req,
+                                             hwaddr=hwaddr),
+                                D4_MSG_ACK, timeout)
+        if not yiaddr2:
+            raise RuntimeError("no DHCPACK received for the requested address")
+
+        dns = [socket.inet_ntoa(ack[D4_OPT_DNS][j:j + 4])
+               for j in range(0, len(ack.get(D4_OPT_DNS, b"")), 4)]
+        routers = [socket.inet_ntoa(ack[D4_OPT_ROUTER][j:j + 4])
+                   for j in range(0, len(ack.get(D4_OPT_ROUTER, b"")), 4)]
+        lease_time = (struct.unpack("!I", ack[D4_OPT_LEASE_TIME])[0]
+                      if D4_OPT_LEASE_TIME in ack else None)
+        mask = (socket.inet_ntoa(ack[D4_OPT_SUBNET_MASK])
+                if D4_OPT_SUBNET_MASK in ack else None)
+
+        # Release so the probe does not consume a pool address.
+        rel = (bytes([D4_OPT_SERVER_ID, len(server_id)]) + server_id if server_id else b"")
+        try:
+            sock.sendto(_dhcp4_frame(xid, D4_MSG_RELEASE,
+                                     ciaddr=socket.inet_aton(yiaddr2), extra=rel,
+                                     hwaddr=hwaddr),
+                        (server_id and socket.inet_ntoa(server_id) or "255.255.255.255",
+                         D4_SERVER_PORT))
+        except OSError:
+            pass
+
+        return {"address": yiaddr2, "server": socket.inet_ntoa(server_id) if server_id else None,
+                "router": routers, "dns": dns, "mask": mask, "lease_time": lease_time}
+    finally:
+        sock.close()
+
 # --- result bookkeeping --------------------------------------------------
 def result(results, name, status, detail):
     results.append({"test": name, "status": status, "detail": detail})
@@ -370,6 +516,10 @@ def main():
     ap.add_argument("--dns-name", default="freifunk.net")
     ap.add_argument("--timeout", type=int, default=6)
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--lease", action="store_true",
+                    help="also acquire a DHCPv4 lease (client mode, needs root); "
+                         "the probe releases the address afterwards")
+    ap.add_argument("--pool", help="expected DHCPv4 pool, e.g. 10.112.65.0-10.112.71.254")
     ap.add_argument("--skip-raw", action="store_true",
                     help="skip RA/DHCPv6 (not root)")
     args = ap.parse_args()
@@ -488,6 +638,50 @@ def main():
                 else:
                     result(results, f"ra ({tag})", SKIP,
                            "no RA on the gateway's own interface; see gateway radv")
+
+
+        # --- DHCPv4 lease ------------------------------------------------
+        if args.lease:
+            if not args.gateway_v4:
+                result(results, f"dhcpv4 ({tag})", SKIP,
+                       "lease acquisition is a client-side test "
+                       "(pass --interface and --gateway-v4)")
+            else:
+                try:
+                    lease = dhcp4_lease(ifname, timeout=args.timeout,
+                                        unicast=args.gateway_v4)
+                except PermissionError as e:
+                    result(results, f"dhcpv4 ({tag})", SKIP, str(e))
+                except Exception as e:  # noqa: BLE001
+                    result(results, f"dhcpv4 ({tag})", FAIL, str(e))
+                else:
+                    ok = True
+                    notes = []
+                    if args.pool:
+                        inside = in_range(lease["address"], args.pool)
+                        ok = ok and inside
+                        notes.append(f"address {lease['address']} "
+                                     f"{'inside' if inside else 'OUTSIDE'} pool {args.pool}")
+                    else:
+                        notes.append(f"address {lease['address']}")
+                    if lease["router"]:
+                        r_ok = args.gateway_v4 in lease["router"]
+                        ok = ok and r_ok
+                        notes.append(f"router {lease['router']} "
+                                     f"{'matches' if r_ok else 'does NOT match'} "
+                                     f"gateway {args.gateway_v4}")
+                    else:
+                        ok = False
+                        notes.append("router option missing")
+                    if lease["dns"]:
+                        notes.append(f"dns {lease['dns']}")
+                    else:
+                        ok = False
+                        notes.append("dns option missing")
+                    notes.append(f"mask {lease['mask']}, lease {lease['lease_time']} s, "
+                                 f"server {lease['server']}")
+                    result(results, f"dhcpv4 ({tag})", PASS if ok else FAIL,
+                           "; ".join(notes))
 
         # --- DHCPv6 -----------------------------------------------------
         try:

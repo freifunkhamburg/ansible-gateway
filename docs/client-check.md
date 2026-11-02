@@ -33,6 +33,7 @@ Exit status: `0` all pass (skips allowed), `2` at least one failure.
 | `ntp v4` / `ntp v6` | SNTP request to port 123 on the region address | stratum 1-15, offset within 2 s |
 | `ra` | Router Solicitation (ICMPv6 133) on the bat interface, 6 s window | at least one RA with router lifetime > 0, a /64 PIO with L+A, and RDNSS |
 | `dhcpv6` | INFORMATION-REQUEST (type 11) with an ORO to `ff02::1:2`, parsing the REPLY | DNS servers (23) and information-refresh-time (32) present |
+| `dhcpv4` (opt-in, `--lease`) | DISCOVER/OFFER/REQUEST/ACK as a client, then RELEASE | yiaddr inside `--pool`, router option equals `--gateway-v4`, DNS option present |
 
 Gateway mode (run on the gateway, no `--gateway-v4`) additionally checks
 `birdc` RADV state, that RADV exports exactly one default route, the uplink
@@ -74,8 +75,13 @@ one forward name. PTRs are checked by `playbooks/gateway-reverse-check.yml`
   path run the script from an AP/client host with `--gateway-v4/--gateway-v6`.
 - Uplink reachability uses ICMP; if a transit firewall drops echo, ping fails
   while the SNAT/TCP probe still proves reachability.
-- DHCPv4 lease acquisition is not covered (only the DHCPv6 information
-  service); Kea's v4 pools are checked structurally by the playbooks instead.
+- DHCPv4 lease acquisition is opt-in (`--lease`, client mode only, needs root):
+  it acquires and immediately releases a lease, so no pool address is consumed.
+  Kea binds per-interface rather than to `INADDR_ANY`, so the probe sends to
+  the limited broadcast first and falls back to the gateway's unicast address;
+  run it from an AP/client host to exercise the real forwarding path.
+- Gateway mode still does not acquire a v4 lease (the gateway is the server);
+  Kea's v4 pools remain structurally checked by the playbooks.
 - Raw ICMPv6/UDP 546 need root (`--skip-raw` downgrades RA/DHCPv6 to SKIP).
 - **The `ra` test on the gateway is a SKIP, not a pass**: the gateway's own
   multicast delivery to a raw ICMPv6 socket is not guaranteed. Gateway mode

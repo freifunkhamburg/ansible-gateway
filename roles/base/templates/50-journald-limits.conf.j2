@@ -1,0 +1,8 @@
+[Journal]
+# Cap the journal so a busy gateway cannot fill its disk with logs.
+# Retention is time-based as well as size-based: old entries are dropped
+# even when the journal is below the size cap.
+SystemMaxUse={{ journald_max_use }}
+SystemMaxFileSize={{ journald_max_file_size }}
+SystemKeepFree=1G
+MaxRetentionSec={{ journald_retention }}

@@ -1,0 +1,10 @@
+---
+# --- log retention ------------------------------------------------------
+journald_max_use: "500M"
+journald_max_file_size: "50M"
+journald_retention: "30day"
+
+# --- auditd ------------------------------------------------------------
+# A small identity/privilege ruleset only; full execve auditing floods the
+# journal. Turn off on hosts where auditd conflicts with the monitoring setup.
+audit_enabled: true

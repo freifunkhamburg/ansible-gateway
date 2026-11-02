@@ -28,3 +28,58 @@
   register: sysctl_apply
   changed_when: false
   failed_when: false
+
+# --- log retention -----------------------------------------------------
+- name: Render the journald limits drop-in
+  ansible.builtin.template:
+    src: 50-journald-limits.conf.j2
+    dest: /etc/systemd/journald.conf.d/50-journald-limits.conf
+    owner: root
+    group: root
+    mode: "0644"
+  register: journald_limits
+
+- name: Restart journald to apply the limits
+  ansible.builtin.systemd_service:
+    name: systemd-journald
+    state: restarted
+  when: journald_limits.changed
+
+# --- auditd ------------------------------------------------------------
+- name: Install auditd
+  ansible.builtin.apt:
+    name: auditd
+    state: present
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  when: audit_enabled | bool
+
+- name: Render the audit ruleset
+  ansible.builtin.template:
+    src: audit-rules.j2
+    dest: /etc/audit/rules.d/ffhh.rules
+    owner: root
+    group: root
+    mode: "0640"
+  register: audit_rules
+  when: audit_enabled | bool
+
+- name: Enable and start auditd
+  ansible.builtin.systemd_service:
+    name: auditd
+    enabled: true
+    state: started
+  when: (audit_enabled | bool) and not ansible_check_mode
+
+- name: Reload the audit rules when they changed
+  ansible.builtin.command: /usr/sbin/augenrules --load
+  changed_when: true
+  when: (audit_enabled | bool) and audit_rules.changed and not ansible_check_mode
+
+- name: Stop and disable auditd when it is turned off
+  ansible.builtin.systemd_service:
+    name: auditd
+    enabled: false
+    state: stopped
+  when: not (audit_enabled | bool)
+  failed_when: false

@@ -29,21 +29,38 @@ template dialects, or compatibility paths for older hosts.
 `gw01`–`gw04` are inventory entries kept for address/pool reservations and peer
 derivation. Do not apply the automation to them; `gw05` is the managed host.
 
-## 2. Branch workflow: develop on branches, squash-merge when working
+## 2. Branch workflow: verify on gw05 before merging
 
 `main` is the deployable state of the gateways: every commit on it is proven,
-and applying `main` to gw05 must always be safe. Therefore:
+and applying `main` to gw05 must always be safe. Therefore a branch that can
+change gateway state is merged only after it has run against the live host:
 
-- New features and risky changes start from `main` on a branch
-  (`feature/<topic>`, `fix/<topic>`); commit freely there.
-- Before merging, the branch must pass against the live host:
-  `.venv-ansible/bin/ansible-playbook playbooks/gateway.yml -l gw05 --check --diff`
-  shows intended changes only, no drift left unexplained.
-- Merge with `git merge --squash feature/<topic>` into `main` (one commit per
-  feature; branch may be deleted afterwards), push `origin main`.
-- Small, obvious fixes (docs, comments, typos) may go straight to `main`.
-- Publish to GitHub only on explicit request (see §0); squash `main` into a
-  single commit unless leo asks for full history.
+1. `git checkout feature/<topic>`
+2. Apply the branch, not a simulated run:
+   `.venv-ansible/bin/ansible-playbook playbooks/gateway.yml -l gw05`
+3. Confirm the services the change touches are still up — at minimum
+   `knot-resolver`, `isc-kea-dhcp4-server`, `isc-kea-dhcp6-server`, `bird`
+   and all `fastd@*` instances — plus a targeted probe (`mesh-client-check`,
+   `dig`, `birdc`).
+4. Record the outcome in the commit trailer `Tested-on: gw05 (…)`.
+
+Then merge the branch into `main` as one commit (`git merge --squash`, branch
+may be deleted afterwards) and push `origin main`. Re-run `main` on gw05
+afterwards and require `changed=0`: that proves the merged commit is exactly
+the tested state.
+
+`--check --diff` alone is not the gate: check mode creates no directories and
+starts no services, so it hides ordering and permission bugs.
+
+gw05 is the only managed host (§1), so verifying a branch means applying it to
+production. That does not shrink the blast radius — it guarantees `main` never
+carries untested code and that a failure is attributable to a branch rather
+than to `main`. For changes that can take a service down, state the rollback
+and install artifacts before any config that references them.
+
+Small, obvious fixes (docs, comments, typos) may go straight to `main`.
+Publish to GitHub only on explicit request (see §0); collapse `main` into a
+single commit unless leo asks for full history.
 
 ## 3. One run
 

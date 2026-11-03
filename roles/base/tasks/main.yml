@@ -30,6 +30,14 @@
   failed_when: false
 
 # --- log retention -----------------------------------------------------
+- name: Ensure the journald drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
 - name: Render the journald limits drop-in
   ansible.builtin.template:
     src: 50-journald-limits.conf.j2

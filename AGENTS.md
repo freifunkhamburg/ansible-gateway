@@ -106,3 +106,38 @@ Kea block, Gluon domain) belongs in `region_vars`.
 The workspace uses an allowlist proxy. Source downloads and data clones happen
 on the target, not on the controller. If controller-side access is needed and
 is refused, stop that step rather than trying alternative routes.
+
+## 8. Commit messages
+
+Conventional Commits (https://www.conventionalcommits.org/en/v1.0.0/):
+
+```
+<type>(<scope>): <subject>
+
+<body>
+
+<trailers>
+```
+
+- Types: `feat`, `fix`, `chore`, `ci`, `docs`, `test`, `refactor`.
+  Use a `BREAKING CHANGE:` footer when a role variable changes meaning.
+- Scope is the module, never the host: `repo`, `ci`, `base`, `knot`, `kea`,
+  `firewall`, `client-check`, `agents`, `inventory`.
+- Subject: lowercase, imperative, no trailing period, at most 72 characters.
+- Body: what changed and why in one short paragraph, wrapped at 72. It is not
+  a changelog of the diff; call out consequences and defects fixed.
+- Trailers: `Tested-on: gw05 (…)` (see §2) and `Refs: #<issue>`.
+- Do not mention "squash" or the branch name in the message: consolidation is a
+  merge-tool detail, not part of the change. Merged branches are deleted.
+
+Example:
+
+```
+fix(base): create the journald drop-in directory before writing it
+
+The directory does not exist on a stock trixie install, so the first
+non-check-mode apply failed. Check mode hid the gap because it creates no
+directories.
+
+Tested-on: gw05
+```

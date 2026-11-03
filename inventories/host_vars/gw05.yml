@@ -50,6 +50,13 @@ gw_kea_pools:
   hhnowe: "10.112.193.0-10.112.199.254"
   hhost: "10.112.225.0-10.112.231.254"
 
+# --- resolver: IPv4 client PTR synthesis -------------------------------
+# Enabled on gw05 by decision: leased v4 addresses answer PTR as
+# ipv4-<8 hex>.<region>.clients.hamburg.freifunk.net instead of NXDOMAIN.
+# See docs/knot-resolver.md for the exposure caveat. Kept off for other
+# gateways until the same decision is made there.
+knot_client_ptr_enabled: true
+
 # Additional DHCPv6 resolver advertised beside this gateway's own primary
 # region address.
 kea_dhcp6_dns_peers:

@@ -1,10 +1,14 @@
 #!/bin/sh
 # Export the Kea v4 lease DB into a kresd-readable copy.
 # Kea's memfile DB is 0640 root:_kea; kresd runs as {{ knot_user }} and must
-# not be able to write it, so a plain 0644 copy is refreshed by a timer.
+# not be able to write it. The copy is root-owned, group {{ knot_user }},
+# 0640 -- readable by the resolver only, not by every local user.
+# The directory itself is owned by the role (roles/knot tasks), not by this
+# script: `install -d -m` would re-chmod it on every run and break idempotence.
 set -eu
-install -d -m 0755 "{{ knot_client_ptr_dir }}"
+mkdir -p "{{ knot_client_ptr_dir }}"
 if [ -f "{{ knot_client_ptr_source }}" ]; then
     cp -f "{{ knot_client_ptr_source }}" "{{ knot_client_ptr_leases }}"
-    chmod 0644 "{{ knot_client_ptr_leases }}"
+    chown root:{{ knot_user }} "{{ knot_client_ptr_leases }}"
+    chmod 0640 "{{ knot_client_ptr_leases }}"
 fi

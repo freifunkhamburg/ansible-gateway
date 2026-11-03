@@ -120,10 +120,12 @@ The name follows the upstream IPv6 client pattern, with the 32-bit address in
 Mechanics:
 
 - `knot_client_ptr_enabled` (default `false`) enables the feature on a gateway.
-- `knot-client-ptr-export.service` + `.timer` copy Kea's memfile lease DB
-  (`/var/lib/kea/kea-leases4.csv`, `0640 root:_kea`) into a `0644` file under
-  `/var/lib/knot-resolver/` every minute, so the resolver user never needs
-  access to Kea's data.
+  It is set to `true` in `inventories/host_vars/gw05.yml`.
+- `knot-client-ptr-export.service` + `knot-client-ptr.timer` copy Kea's
+  memfile lease DB (`/var/lib/kea/kea-leases4.csv`, `0640 root:_kea`) into a
+  `0640 root:knot-resolver` file under `/var/lib/knot-resolver/` every minute,
+  so the resolver can read leases without being able to write them and without
+  every local user being able to read them.
 - `client-ptr.lua` is loaded by kresd, registers a `policy.suffix` rule for
   `112.10.in-addr.arpa` **before** the forwarding rule, and answers PTRs for
   leases whose `expire` is still in the future. Expired leases fall through to

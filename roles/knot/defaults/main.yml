@@ -11,6 +11,10 @@ knot_cache_dir: /run/knot-resolver
 knot_bin: /usr/local/sbin/kresd
 knot_user: knot-resolver
 knot_port: 53
+# Canonical address of the gateway name in the community IPv4 reverse zone
+# (10.112.1.5 -> gw05.ffhh); used for the local-zone path check when
+# knotd_enabled is set.
+knotd_v4_static_probe: "10.112.1.5"
 knot_cache_mb: 100
 knot_upstream_ffhh: "2a00:14b0:4200:3380:134::1"
 

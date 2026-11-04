@@ -57,6 +57,12 @@ gw_kea_pools:
 # gateways until the same decision is made there.
 knot_client_ptr_enabled: true
 
+# Authoritative reverse DNS on this gateway (roles/knotd): Knot Resolver
+# serves the IPv4 reverse zone from a local Knot DNS instance transferred
+# from the community DNS. Without this, kresd's RFC 6303 empty zone
+# 10.in-addr.arpa swallows 112.10.in-addr.arpa and even gw05.ffhh is NXDOMAIN.
+knotd_enabled: true
+
 # Additional DHCPv6 resolver advertised beside this gateway's own primary
 # region address.
 kea_dhcp6_dns_peers:

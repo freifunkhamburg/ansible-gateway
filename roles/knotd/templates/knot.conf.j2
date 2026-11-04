@@ -1,0 +1,38 @@
+{#
+  Knot DNS (authoritative) for the mesh IPv4 reverse zone.
+
+  Listen on a dedicated loopback address: Knot Resolver forwards the zone
+  here in authoritative mode (which uses port 53), so no traffic from
+  clients reaches this server and no firewall port is needed.
+
+  Why this exists at all: kresd ships the RFC 6303 empty zones, and
+  10.in-addr.arpa is one of them.  Our mesh reverse zone 112.10.in-addr.arpa
+  is a subdomain of that, so kresd answers NXDOMAIN for every name there
+  before it ever asks upstream.  Serving the zone from a local authoritative
+  server (and adding a more specific authoritative-forward rule in kresd)
+  makes the gateway names in the community zone resolvable again.
+
+  Only the static records are served; client PTR synthesis stays where it
+  already is (kresd policy from Kea leases, opt-in).  This keeps the
+  documented naming schemes unchanged.
+#}
+server:
+  listen: {{ knotd_listen }}@{{ knotd_port }}
+  rundir: /run/knot
+  user: knot:knot
+
+log:
+  - target: syslog
+    any: info
+
+database:
+  storage: "{{ knotd_storage }}"
+
+remote:
+  - id: community-dns
+    address: {{ knotd_master_v4 }}@{{ knotd_master_port }}
+
+zone:
+  - domain: {{ mesh_reverse_v4 }}
+    master: community-dns
+    zonefile-sync: 0

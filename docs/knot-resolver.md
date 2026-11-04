@@ -64,7 +64,7 @@ the name from the address itself: `ipv6-<16 nibbles>.<region>.clients.hamburg.fr
 
 kresd cannot follow that delegation: `srv03.hamburg.freifunk.net` is an
 auth-only PTR responder (it returns NXDOMAIN for `NS`/`SOA` at the zone apex),
-so kresd reports `LAME_DELEGATION` and `SERVFAIL`s. The reverse zones are
+so kresd reports `LAME_DELEGATION` and `SERVFAIL`s. The IPv6 reverse zone is
 therefore forwarded to the community DNS and marked `DNSSEC_INSECURE`.
 
 The explicit `NO_0X20` flag is required on these zones: kresd randomises the
@@ -83,16 +83,24 @@ Two limits of the upstream data, both identical to the legacy unbound gateway:
 
 - **No IPv4 client PTRs upstream.** The community DNS only serves gateway
   names in `112.10.in-addr.arpa`; a client address in the mesh `/16` answers
-  `NXDOMAIN`. The gateway forwards the zone; it can additionally synthesise
-  PTRs from its own Kea leases, but that is **opt-in** because it exposes
-  which addresses are currently leased (see below).
+  `NXDOMAIN`. The gateway answers the zone from a local authoritative Knot
+  DNS instance (`roles/knotd`, optional via `knotd_enabled`) that mirrors
+  those static records over AXFR. This is necessary because kresd ships the
+  RFC 6303 empty zone `10.in-addr.arpa`, which shadows our subdomain
+  `112.10.in-addr.arpa` and would answer `NXDOMAIN` before kresd even asks
+  upstream -- including for `gw05.ffhh`. The zone is attached to kresd's
+  rules DB with `policy.rule_forward_add(..., {auth = true, dnssec = false})`,
+  not with `policy.FORWARD`, for the same reason. Client PTRs are still
+  synthesised only from this gateway's Kea leases (**opt-in**, see below), so
+  unassigned addresses keep answering `NXDOMAIN` and the naming schemes stay
+  unchanged.
 - **Only ordinals 1-3 have gateway names.** `2a03:2267:R::10/::20/::30`
   resolve to `gwNN-new.<region>.hamburg.freifunk.net`; addresses for ordinals
   4 and 5 (including gw05's own address `::50`) fall back to the client naming
   pattern `ipv6-<16 nibbles>.<region>.clients.hamburg.freifunk.net`.
   Upstream also maps `2a03:2267:4::1` to `knoten.ffhh.`
 
-Case sensitivity: `NO_0X20` is applied only to the two mesh reverse zones.
+Case sensitivity: `NO_0X20` is applied only to the IPv6 mesh reverse zone.
 Queries for the `ffhh` zone are forwarded as-is, and the community DNS answers
 them case-insensitively (verified: `NODE.FFHH` returns the same CNAME as
 `node.ffhh`). That is an upstream property, not something kresd guarantees;

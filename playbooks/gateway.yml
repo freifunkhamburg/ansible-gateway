@@ -30,6 +30,7 @@
     - kea           # DHCPv4 + DHCPv6
     - bird          # OSPF/BGP/static routes
     - services      # resolver, time, vnstat, fail2ban
+    - knotd         # authoritative reverse DNS (loopback; Knot Resolver forwards to it)
     - knot          # client-facing Knot Resolver (build dependency)
     - fastd         # tunnels (start requires secrets)
     - ssh           # hardening + administrator keys

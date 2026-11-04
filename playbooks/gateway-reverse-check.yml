@@ -57,6 +57,11 @@
       register: rdns
       changed_when: false
       failed_when: false
+      # Right after a kresd restart the first recursions can SERVFAIL while the
+      # resolver primes its upstream selection; retry the whole table.
+      retries: 3
+      delay: 5
+      until: rdns.rc == 0
 
     - name: Show the results
       ansible.builtin.debug:

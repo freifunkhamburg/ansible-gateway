@@ -215,6 +215,35 @@
     label: "{{ res.p.region }} {{ res.p.host }}"
   when: not ansible_check_mode
 
+# Path check for the local authoritative IPv4 zone: 10.112.1.5 is the
+# community zone's canonical gw05.ffhh address (override per gateway).
+- name: Probe the static IPv4 gateway PTR through Knot Resolver
+  ansible.builtin.command:
+    cmd: >-
+      dig +short +time=5 +tries=1 -x {{ knotd_v4_static_probe }}
+      @127.0.0.1 -p {{ knot_port }}
+  register: knot_v4_static_path
+  changed_when: false
+  failed_when: false
+  retries: 3
+  delay: 3
+  until: knot_v4_static_path.stdout | trim == 'gw05.ffhh.'
+  when:
+    - not ansible_check_mode
+    - knotd_enabled | bool
+
+- name: Assert the static IPv4 gateway PTR reaches clients
+  ansible.builtin.assert:
+    that:
+      - knot_v4_static_path.stdout | trim == 'gw05.ffhh.'
+    fail_msg: >-
+      {{ knotd_v4_static_probe }} -> '{{ knot_v4_static_path.stdout | trim }}'
+      (expected gw05.ffhh.). The kresd rules-DB forward to roles/knotd is not
+      working; check policy.rule_forward_add() in {{ knot_conf }}.
+  when:
+    - not ansible_check_mode
+    - knotd_enabled | bool
+
 - name: Verify the resolver version
   ansible.builtin.command: "{{ knot_bin }} --version"
   register: knot_ver
@@ -227,7 +256,8 @@
       {{ knot_ver.stdout }} listening on {{ knot_port }};
       node.ffhh AAAA -> {{ knot_probe.stdout | trim }};
       {{ knot_rev_probe_addr }} PTR -> {{ knot_rev_verify.stdout | trim }};
-      client PTRs: {{ knot_client_rev.results
+      static v4: {{ knot_v4_static_path.stdout | default('') | trim }};
+      client PTRs: {{ (knot_client_rev.results | default([]))
                       | map(attribute='stdout') | map('trim') | join(', ') }}
   when: not ansible_check_mode
 

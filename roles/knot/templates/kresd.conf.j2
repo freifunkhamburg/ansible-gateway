@@ -165,7 +165,7 @@ dofile('{{ knot_client_ptr_lua }}')
 -- ---------- ffhh zones ------------------------------------------------
 policy.add(policy.suffix(policy.FLAGS({'DNSSEC_INSECURE'}), {todname('ffhh')}))
 policy.add(policy.suffix(policy.FORWARD('{{ knot_upstream_ffhh }}'), {todname('ffhh')}))
--- Mesh reverse zones are forwarded to the community DNS and marked
+-- The IPv6 mesh reverse zone is forwarded to the community DNS and marked
 -- insecure.  Two kresd quirks have to be neutralised here:
 --
 -- 1. DNSSEC: the /32 reverse delegation (7.6.2.2.3.0.a.2.ip6.arpa) has no
@@ -180,7 +180,20 @@ policy.add(policy.suffix(policy.FORWARD('{{ knot_upstream_ffhh }}'), {todname('f
 --    that mixed-case name to its case-sensitive backend, which answers
 --    NXDOMAIN unless the name happens to be cached.  NO_0X20 keeps the
 --    forwarded queries all-lowercase, matching what unbound sends.
-{% for z in [mesh_reverse_v4, mesh_reverse_v6] %}
+{% if knotd_enabled %}
+-- IPv4 reverse DNS is served locally by roles/knotd (authoritative Knot DNS
+-- on a loopback address).  dnssec = false adds a negative trust anchor for
+-- the subtree: the zone is unsigned and also lives inside kresd's RFC 6303
+-- empty zone 10.in-addr.arpa, which otherwise answers NXDOMAIN first.
+policy.rule_forward_add('{{ mesh_reverse_v4 }}', {auth = true, dnssec = false}, { { '{{ knotd_listen }}' } })
+{% else %}
+{% for z in [mesh_reverse_v4] %}
+policy.add(policy.suffix(policy.FLAGS('NO_0X20'), {todname('{{ z }}')}))
+policy.add(policy.suffix(policy.FLAGS({'DNSSEC_INSECURE'}), {todname('{{ z }}')}))
+policy.add(policy.suffix(policy.FORWARD('{{ knot_upstream_ffhh }}'), {todname('{{ z }}')}))
+{% endfor %}
+{% endif %}
+{% for z in [mesh_reverse_v6] %}
 policy.add(policy.suffix(policy.FLAGS('NO_0X20'), {todname('{{ z }}')}))
 policy.add(policy.suffix(policy.FLAGS({'DNSSEC_INSECURE'}), {todname('{{ z }}')}))
 policy.add(policy.suffix(policy.FORWARD('{{ knot_upstream_ffhh }}'), {todname('{{ z }}')}))

@@ -1,0 +1,203 @@
+---
+# Services: DNS backend (knot by default, unbound de-selectable), time
+# daemon, vnstat and fail2ban.
+
+- name: Install service packages
+  ansible.builtin.apt:
+    name:
+      - vnstat
+      - fail2ban
+    state: present
+
+- name: Install unbound (only when the unbound backend is selected)
+  ansible.builtin.apt:
+    name:
+      - unbound
+    state: present
+  when: dns_backend == "unbound"
+
+# The distro Knot Resolver package is purged by roles/knot_build; the
+# distro unbound package must go when knot is the client-facing resolver.
+- name: Remove unbound when knot is the selected backend
+  ansible.builtin.apt:
+    name:
+      - unbound
+    state: absent
+  when: dns_backend != "unbound"
+
+# --- DNS resolver: unbound (alternate backend, kept de-selected) -----------
+- name: Install the staged-config validator for the chrooted unbound
+  ansible.builtin.copy:
+    src: unbound-check-staged.sh
+    dest: /usr/local/lib/unbound-check-staged.sh
+    owner: root
+    group: root
+    mode: "0755"
+  when: dns_backend == "unbound"
+
+- name: Render /etc/unbound/unbound.conf
+  ansible.builtin.template:
+    src: unbound.conf.j2
+    dest: "{{ unbound_conf }}"
+    owner: root
+    group: root
+    mode: "0644"
+    # The config chroots to /var/lib/unbound (reference), and unbound-checkconf
+    # really chroots: it needs the staged config tree inside the chroot, which
+    # only the unit's ExecStartPre (unbound-helper chroot_setup) creates at
+    # start time. Stage the same tree for the check: the staged file itself
+    # plus the current /etc/unbound (so the conf.d includes resolve).
+    validate: /bin/sh /usr/local/lib/unbound-check-staged.sh %s
+  notify: restart unbound
+  when: dns_backend == "unbound"
+
+- name: Ensure unbound conf.d exists
+  ansible.builtin.file:
+    path: "{{ unbound_conf_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: dns_backend == "unbound"
+
+# DNS data drops. ffhh.conf and nodeffhh.conf are hand-maintained data
+# shipped with this role, not generated from a repository. nodeffhh.conf
+# resolves node./knoten./router.ffhh and the NTP service names (IPv6:
+# N.ntp.services.ffhh, IPv4 aliases: v4.N.ntp.services.ffhh) per client subnet
+# via unbound access-control tags.
+- name: Install the ffhh DNS conf.d drops (hand-maintained data)
+  ansible.builtin.copy:
+    src: "unbound/{{ item }}"
+    dest: "{{ unbound_conf_dir }}/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - ffhh.conf
+    - nodeffhh.conf
+    - qname-minimisation.conf
+  notify: restart unbound
+  when: dns_backend == "unbound"
+
+- name: Enable and start unbound
+  ansible.builtin.systemd_service:
+    name: unbound.service
+    state: started
+    enabled: true
+  when: dns_backend == "unbound"
+
+- name: Stop the knot resolver when unbound is selected
+  ansible.builtin.systemd_service:
+    name: "{{ knot_unit }}"
+    state: stopped
+    enabled: false
+  when: dns_backend != "knot"
+  failed_when: false
+
+# --- system resolver ----------------------------------------------------
+# /etc/resolv.conf: the local resolver (127.0.0.1, whichever backend) first,
+# public resolvers as fallback. This is a plain file on Debian 13 (no
+# resolvconf package installed), so it can be managed directly.
+- name: Render /etc/resolv.conf (local resolver first, public fallback)
+  ansible.builtin.template:
+    src: resolv.conf.j2
+    dest: /etc/resolv.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+# Keep the Debian package from rewriting resolv.conf to 127.0.0.1 only: the
+# helper is inert while /sbin/resolvconf is absent, but disabling it prevents
+# that rewrite if resolvconf is ever pulled in as a dependency.
+- name: Disable unbound-resolvconf (must not replace /etc/resolv.conf)
+  ansible.builtin.systemd_service:
+    name: unbound-resolvconf.service
+    state: stopped
+    enabled: false
+  when: dns_backend == "unbound"
+
+# --- time ---------------------------------------------------------------
+# Backend switch. chrony is selected; ntpsec remains in this repo but is
+# de-selected: its unit is stopped, its package (and conffiles/cron.d entry)
+# is purged, and its template is not rendered. Flip ntp_backend to
+# "ntpsec" to go back.
+- name: Stop the de-selected time daemon
+  ansible.builtin.systemd_service:
+    name: "{{ ntp_removed_unit }}"
+    state: stopped
+    enabled: false
+  when: ntp_backend == "chrony"
+  failed_when: false
+
+- name: Remove the de-selected time daemon and its configuration
+  ansible.builtin.apt:
+    name: "{{ ntp_removed_package }}"
+    state: absent
+    purge: true
+  when: ntp_backend == "chrony"
+
+- name: Install the selected time daemon
+  ansible.builtin.apt:
+    name: "{{ ntp_package }}"
+    state: present
+
+- name: Render {{ ntp_conf }}
+  ansible.builtin.template:
+    src: >-
+      {{ 'chrony.conf.j2' if ntp_backend == 'chrony'
+         else 'ntpsec.conf.j2' }}
+    dest: "{{ ntp_conf }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart ntp
+
+- name: Enable and start {{ ntp_unit }}
+  ansible.builtin.systemd_service:
+    name: "{{ ntp_unit }}"
+    state: started
+    enabled: true
+
+# The daemon reads its config only at start; if a previous run rendered the
+# config after the unit started, the old config (Debian pool) stays loaded.
+# Guard: restart when the unit's start time predates the rendered config.
+- name: Restart the time daemon if it predates its configuration
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      start=$(systemctl show -p ActiveEnterTimestamp --value "{{ ntp_unit }}" \
+              | date -f - +%s || true)
+      conf=$(stat -c %Y "{{ ntp_conf }}")
+      if [ -n "$start" ] && [ "$start" -lt "$conf" ]; then
+        systemctl restart "{{ ntp_unit }}"
+        echo restarted
+      fi
+    executable: /bin/bash
+  register: ntp_restart_guard
+  changed_when: ntp_restart_guard.stdout | trim == "restarted"
+  when: not ansible_check_mode
+
+# --- traffic accounting ---------------------------------------------------
+- name: Enable and start vnstat
+  ansible.builtin.systemd_service:
+    name: vnstat.service
+    state: started
+    enabled: true
+
+# --- brute-force protection -------------------------------------------------
+- name: Enable fail2ban for sshd
+  ansible.builtin.copy:
+    content: |
+      [sshd]
+      enabled = true
+    dest: "{{ fail2ban_jail }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart fail2ban
+
+- name: Enable and start fail2ban
+  ansible.builtin.systemd_service:
+    name: fail2ban.service
+    state: started
+    enabled: true

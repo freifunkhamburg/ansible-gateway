@@ -1,0 +1,3 @@
+# m h dom mon dow user  command
+# Periodic batman-adv record + syslog alert on ERROR/collection failure.
+*/15 * *   *   *   root  /usr/local/bin/batman-health-report >/dev/null 2>&1

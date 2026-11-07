@@ -1,0 +1,83 @@
+#!/bin/bash
+# Periodic software update check for components that are not plain Debian apt
+# packages (source builds, git pins, the Kea LTS pin).
+#
+# The checker needs network (git ls-remote to each upstream); it must not run at
+# login, so the result is cached here and the motd only reads the summary.
+#
+# Exit codes of check-upstream-versions: 0 current, 1 at least one component
+# behind upstream, 2 at least one check could not be completed.
+set -u
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+state_dir="{{ upstream_versions_state_dir }}"
+json="$state_dir/state.json"
+summary="$state_dir/summary.txt"
+errlog="$state_dir/last-error.log"
+
+mkdir -p "$state_dir" || exit 0
+
+rc=0
+tmp="$state_dir/.state.$$"
+{{ upstream_check_bin }} --catalog "{{ upstream_check_catalog }}" --json \
+    > "$tmp" 2> "$errlog" || rc=$?
+
+if [ -s "$tmp" ]; then
+    mv -f "$tmp" "$json"
+else
+    rm -f "$tmp"
+fi
+
+checked=$(date '+%Y-%m-%d %H:%M')
+new="$state_dir/.summary.$$"
+
+# The cached state must be valid JSON; if jq cannot read it the motd must say
+# so, never "all 0 components current".
+behind=""; differing=""; failed=""; total="0"; unreadable=""
+if [ -s "$json" ]; then
+    if ! jq -e '.components | length > 0' "$json" >/dev/null 2>&1; then
+        unreadable="cached result unreadable"
+    else
+        behind=$(jq -r '[.components[] | select(.status == "outdated")
+                         | "\(.name) \(.installed)->\(.upstream)"] | join(", ")' \
+                  "$json" 2>/dev/null) || behind=""
+        differing=$(jq -r '[.components[] | select(.status == "differs") | .name]
+                           | join(", ")' "$json" 2>/dev/null) || differing=""
+        failed=$(jq -r '[.components[] | select(.status == "unknown") | .name]
+                        | join(", ")' "$json" 2>/dev/null) || failed=""
+        total=$(jq -r '.counts.total // (.components | length)' "$json" 2>/dev/null) || total="0"
+    fi
+else
+    unreadable="no result from the checker"
+fi
+
+if [ -n "$unreadable" ]; then
+    reason=$(tr '\n' ' ' < "$errlog" | sed 's/  */ /g;s/^ //;s/ $//' | cut -c1-160)
+    printf 'SOFTWARE UPDATES: check failed — %s%s (checked %s)\n' \
+        "$unreadable" "${reason:+; $reason}" "$checked" > "$new"
+elif [ "$rc" -ge 2 ] && [ -z "$behind" ] && [ -z "$differing" ]; then
+    reason=$(tr '\n' ' ' < "$errlog" | sed 's/  */ /g;s/^ //;s/ $//' | cut -c1-160)
+    printf 'SOFTWARE UPDATES: check failed%s (checked %s)\n' \
+        "${reason:+ — $reason}" "$checked" > "$new"
+elif [ -n "$behind" ] || [ -n "$differing" ]; then
+    line="SOFTWARE UPDATES: behind upstream"
+    [ -n "$behind" ] && line="$line — $behind"
+    [ -n "$differing" ] && line="$line — $differing differ from HEAD"
+    [ -n "$failed" ] && line="$line — check failed: $failed"
+    printf '%s (checked %s)\n' "$line" "$checked" > "$new"
+else
+    printf 'SOFTWARE UPDATES: all %s components current (checked %s)\n' \
+        "$total" "$checked" > "$new"
+fi
+
+mv -f "$new" "$summary"
+
+# Behind upstream is the normal state between playbook runs (the roles rebuild
+# at deploy time), so only a failed/unreadable check is alerted — once a day.
+if [ -n "$unreadable" ] || { [ "$rc" -ge 2 ] && [ -z "$behind" ]; }; then
+    detail=$(tr '\n' ' ' < "$errlog" | sed 's/  */ /g;s/^ //;s/ $//' | cut -c1-160)
+    logger -p daemon.warning -t {{ upstream_versions_alert_tag }} \
+        "software update check failed: ${unreadable:-check returned rc=$rc}${detail:+ — $detail}"
+fi
+
+exit 0

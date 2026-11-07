@@ -1,0 +1,7 @@
+#!/bin/bash
+
+echo -n "Gateway status as of: "
+date
+echo
+
+/root/check.sh | tr -s "\t" | tr '\t' '|' | column -t -s '|'

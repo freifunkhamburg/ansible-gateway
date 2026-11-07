@@ -1,0 +1,67 @@
+auto {{ r.bat_if }}
+iface {{ r.bat_if }} inet static
+  hwaddress ether {{ r.mac_prefix }}0
+  address   {{ r.v4 }}
+  pre-up    /sbin/modprobe batman-adv
+  pre-up    /sbin/ip link add $IFACE type batadv || true
+{% for i in r | fastd_instances(gw_index | int) %}
+  # persistent TAP (MAC de:ad:be:ef:<N*16>:<region><digit>)
+  pre-up    /usr/bin/ip tuntap add dev {{ i.iface }} mode tap || true
+  pre-up    /sbin/ip link set dev {{ i.iface }} address {{ r.mac_prefix }}{{ i.name[-2:] | int }} up
+  pre-up    /usr/local/sbin/batctl meshif $IFACE interface add {{ i.iface }} || true
+{% endfor %}
+  # The region VXLAN is attached by its own stanza below, but re-attach it
+  # here as well: `ifdown bat-<region>` deletes the batadv device while
+  # mesh-<region> stays configured, so a later `ifup bat-<region>` alone
+  # recreates the mesh without its VXLAN hardif. Harmless when the device
+  # does not exist yet (first bring-up) because of `|| true`.
+  pre-up    /usr/local/sbin/batctl meshif $IFACE interface add mesh-{{ r.id }} || true
+  pre-up    /sbin/ip rule add pref 31000 iif $IFACE table mesh || true
+  pre-up    /sbin/ip rule add pref 31001 iif $IFACE unreachable || true
+  pre-up    /sbin/ip rule add pref 31000 from $IF_ADDRESS table mesh || true
+  pre-up    /sbin/ip rule add pref 31001 from $IF_ADDRESS unreachable || true
+  post-up   /usr/local/sbin/batctl meshif $IFACE orig_interval {{ batman_hop_penalty }}
+  post-up   /usr/local/bin/ethtool-disable $IFACE || true
+{% for i in r | fastd_instances(gw_index | int) %}
+  post-up   /usr/local/bin/ethtool-disable {{ i.iface }} || true
+  post-up   /sbin/sysctl -w net.ipv6.conf.{{ i.iface }}.accept_ra=0
+  post-up   /sbin/sysctl -w net.ipv6.conf.{{ i.iface }}.autoconf=0
+{% endfor %}
+  post-up   /sbin/sysctl -w net.ipv4.neigh.$IFACE.base_reachable_time_ms=900000
+  post-down /sbin/ip rule del pref 31000 iif $IFACE table mesh || true
+  post-down /sbin/ip rule del pref 31001 iif $IFACE unreachable || true
+  post-down /sbin/ip rule del pref 31000 from $IF_ADDRESS table mesh || true
+  post-down /sbin/ip rule del pref 31001 from $IF_ADDRESS unreachable || true
+  post-down /sbin/ip link del {{ r.bat_if }} || true
+
+iface {{ r.bat_if }} inet6 static
+  address   {{ r.v6 }}
+  pre-up    /sbin/ip -6 rule add pref 31000 iif $IFACE table mesh || true
+  pre-up    /sbin/ip -6 rule add pref 31001 iif $IFACE unreachable || true
+  pre-up    /sbin/ip -6 rule add pref 31000 from $IF_ADDRESS table mesh || true
+  pre-up    /sbin/ip -6 rule add pref 31001 from $IF_ADDRESS unreachable || true
+  post-up   /sbin/sysctl -w net.ipv6.neigh.$IFACE.base_reachable_time_ms=900000
+  # client-facing interface: never SLAAC or accept an RA-provided default
+  post-up   /sbin/sysctl -w net.ipv6.conf.$IFACE.accept_ra=0
+  post-up   /sbin/sysctl -w net.ipv6.conf.$IFACE.autoconf=0
+  post-down /sbin/ip -6 rule del pref 31000 iif $IFACE table mesh || true
+  post-down /sbin/ip -6 rule del pref 31001 iif $IFACE unreachable || true
+  post-down /sbin/ip -6 rule del pref 31000 from $IF_ADDRESS table mesh || true
+  post-down /sbin/ip -6 rule del pref 31001 from $IF_ADDRESS unreachable || true
+
+auto mesh-{{ r.id }}
+iface mesh-{{ r.id }} inet manual
+  pre-up    /sbin/ip link add $IFACE type vxlan id {{ r.vxlan_id }} dstport 4789 local {{ mesh_vxlan_local }} dev {{ intra_as_if }} || true
+  up        /sbin/ip link set dev $IFACE address {{ r.mac_prefix }}f
+  up        /sbin/ip link set mtu {{ mesh_mtu }} dev $IFACE
+  up        /sbin/ip link set up dev $IFACE
+{% for p in mesh_vxlan_peers %}
+  up        /sbin/bridge fdb append 00:00:00:00:00:00 dev $IFACE dst {{ p }}
+{% endfor %}
+  up        /usr/local/sbin/batctl meshif {{ r.bat_if }} interface add $IFACE
+  post-up   /usr/local/bin/ethtool-disable $IFACE || true
+  post-up   /sbin/sysctl -w net.ipv6.conf.$IFACE.accept_ra=0
+  post-up   /sbin/sysctl -w net.ipv6.conf.$IFACE.autoconf=0
+  down      /sbin/ip link set down dev $IFACE
+  down      /usr/local/sbin/batctl meshif {{ r.bat_if }} interface del $IFACE
+  post-down /sbin/ip link del $IFACE || true

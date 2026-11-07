@@ -1,0 +1,6 @@
+---
+- name: Restart kresd test instance
+  ansible.builtin.systemd:
+    name: "{{ knot_test_unit }}"
+    state: restarted
+    daemon_reload: true

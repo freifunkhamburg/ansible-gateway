@@ -1,0 +1,11 @@
+log to syslog level error;
+method "salsa2012+umac";
+method "null+salsa2012+umac";
+hide ip addresses yes;
+hide mac addresses yes;
+mtu {{ fastd_common_conf.mtu }};
+secure handshakes yes;
+drop capabilities force;
+user "{{ fastd_common_conf.user }}";
+group "{{ fastd_common_conf.group }}";
+packet mark {{ fastd_common_conf.packet_mark }};

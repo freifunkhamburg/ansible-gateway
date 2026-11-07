@@ -1,0 +1,67 @@
+---
+# Operational layer: health automation, helper scripts, cron and
+# monitoring. `service`/`init` calls use systemctl, batctl uses the modern
+# `meshif` syntax, and the Kea control socket lives under /run/kea (Kea 3).
+
+ffnord_conf: /etc/ffnord
+gw_control_ip: 8.8.8.8
+
+# --- vnstat -------------------------------------------------------------
+# Explicit, Ansible-managed monitoring list, composed by the role from
+# served_regions (bat-<region> and mesh-<region>) plus uplink and intra-as.
+# dummy0 and the fastd vpn-* interfaces are excluded on purpose. The daemon
+# must not add interfaces on its own.
+vnstat_conf: /etc/vnstat.conf
+vnstat_interfaces: []
+# check.sh thresholds (percent used): >= warn is "warn", >= max "invalid".
+gw_check_conntrack_warn: 75
+gw_check_conntrack_max: 100
+gw_check_dhcp_warn: 75
+gw_check_dhcp_max: 100
+gw_check_fastd_conn_warn: 50
+gw_check_fastd_conn_max: 100
+gw_check_hdd_warn: 90
+
+kea_unit: isc-kea-dhcp4-server.service
+kea_socket: /run/kea/kea-dhcp4.sock
+batman_health: /usr/local/sbin/batman-health
+
+# --- periodic batman health record --------------------------------------
+# A cron job writes the latest dump/report plus a bounded history line per run.
+# Persistent (not /run): the state survives reboot and is small (one JSON dump
+# plus one line per run), and a record is only useful if it outlives the boot
+# that produced it.
+batman_health_state_dir: /var/lib/batman-health
+# 288 lines at 15 min = 3 days of history.
+batman_health_history_lines: 288
+# Alerting is deliberate: ERROR findings and collection failures go to syslog
+# (logger -t batman-health); WARN findings do not, because transient tq drops
+# and dead paths still inside the purge timeout are normal on this mesh.
+batman_health_alert_tag: batman-health
+
+# --- software update check (components not from Debian apt) -------------
+# The checker catalog covers source builds (batman-adv/batctl, fastd, Knot
+# Resolver), git-pinned checkouts (respondd) and the Kea LTS pin (apt from the
+# ISC repo). Results are cached; the motd only reads the cached summary so a
+# login never reaches the network.
+upstream_check_bin: /usr/local/bin/check-upstream-versions
+upstream_check_catalog: /usr/local/share/check-upstream-versions.yml
+upstream_versions_state_dir: /var/lib/upstream-versions
+upstream_versions_alert_tag: upstream-versions
+motd_tail: /etc/motd.tail
+
+operations_packages:
+  - bc
+  - conntrack
+  - jq
+  - socat
+  - vnstati
+  - rsyslog
+  - haveged
+  - irqbalance
+  - ethtool
+  - gzip
+  - python3-yaml
+
+# respondd: the upstream mesh-announce checkout is managed by
+# roles/mesh_announce (mesh_announce_dir / _commit).

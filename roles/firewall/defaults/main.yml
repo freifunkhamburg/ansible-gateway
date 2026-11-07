@@ -1,0 +1,5 @@
+---
+# Netfilter for the Debian 13 gateway. The ruleset is rendered to the
+# persistent locations and restored live whenever the rendered ruleset
+# changed, so a fresh host is firewalled in the same run. The SSH allowlist
+# from host_vars must contain the operator/control paths before applying.

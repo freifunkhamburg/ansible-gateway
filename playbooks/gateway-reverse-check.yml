@@ -1,0 +1,76 @@
+---
+# Mesh reverse DNS check.
+#
+# Verifies, per served region, that the client-facing resolver answers:
+#   - the community gateway PTRs (gw01/gw02/gw03 addresses);
+#   - a fresh (uncached) IPv6 client PTR.
+# Both are answered locally since roles/powerdns took over the served
+# regions' reverse zones: the gateway PTRs are static snapshot/inventory
+# records, the client PTR is synthesized (community hex naming, verified
+# together with its forward record). Outside the served regions kresd
+# still forwards to the community DNS.
+#
+# It also reports informational probes: the gateway's own address per
+# region. Those never fail the run.
+#
+#   ansible-playbook playbooks/gateway-reverse-check.yml
+#   ansible-playbook playbooks/gateway-reverse-check.yml --check --diff
+#
+# The play fails if any real check fails; the full table is printed.
+- name: Check mesh reverse DNS
+  hosts: gw05
+  become: false
+  gather_facts: true
+  roles:
+    - regions
+  vars:
+    rdns_script: /usr/local/bin/reverse-dns-check
+    rdns_server: "127.0.0.1"
+    rdns_port: "{{ knot_port | default(53) }}"
+  tasks:
+    - name: Install the reverse DNS check tool
+      become: true
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../tools/reverse-dns-check.py"
+        dest: "{{ rdns_script }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Compose the check arguments
+      ansible.builtin.set_fact:
+        rdns_argv: >-
+          {{ (rdns_argv | default([rdns_script,
+                                   '--server', rdns_server,
+                                   '--port', rdns_port | string,
+                                   '--gateway-index', gw_index | string]))
+             + ['--region',
+                r.id ~ '|' ~ r.v6_prefix ~ '|' ~ (r.region_index | string)
+                ~ '|' ~ r.v4_net] }}
+      loop: "{{ served_regions }}"
+      loop_control:
+        loop_var: r
+
+    - name: Run the reverse DNS checks
+      ansible.builtin.command:
+        argv: "{{ rdns_argv }}"
+      register: rdns
+      changed_when: false
+      failed_when: false
+      # Right after a kresd restart the first recursions can SERVFAIL while the
+      # resolver primes its upstream selection; retry the whole table.
+      retries: 3
+      delay: 5
+      until: rdns.rc == 0
+
+    - name: Show the results
+      ansible.builtin.debug:
+        msg: "{{ rdns.stdout_lines }}"
+
+    - name: Fail the play when a check failed
+      ansible.builtin.assert:
+        that: rdns.rc == 0
+        fail_msg: >-
+          {{ rdns.stdout_lines | reject('match', '^\\[pass\\]|^reverse DNS|^summary')
+             | list }}
+      when: not ansible_check_mode

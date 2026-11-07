@@ -1,0 +1,5 @@
+---
+- name: reload fastd
+  ansible.builtin.command: pkill -HUP -x fastd
+  changed_when: true
+  failed_when: false

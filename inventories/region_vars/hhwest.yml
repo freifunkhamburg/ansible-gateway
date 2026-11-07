@@ -1,0 +1,32 @@
+# Freifunk Hamburg region: hhwest.
+#
+# The NBMA region: its /19 is announced in the uplink OSPF area and it carries
+# the OSPF neighbours toward the two edge hosts. That neighbour list is a
+# region property, so every gateway serving the region uses the same one.
+
+hhwest:
+  id: hhwest
+  interface_file: hh-west
+  gluon_domain: ffhh_west
+
+  region_index: 2
+  ospf_index: 2
+  dhcp6_index: 2
+
+  v4_net: "10.112.96.0/19"
+  v6_prefix: "2a03:2267:2::/64"
+  tunnel_slots:
+    - { port: 10005 }
+    - { port: 10006 }
+
+  ospf_nbma: true
+
+  ospf_neighbors_v4:
+    - { addr: "10.112.96.21", label: "cloud" }
+    - { addr: "10.112.96.23", label: "speicher" }
+  ospf_neighbors_v6:
+    - { addr: "fe80::224:21ff:fe2e:63f9", label: "cloud" }
+    - { addr: "fe80::7285:c2ff:fe23:d4ae", label: "speicher" }
+
+  kea:
+    static_include: "/var/lib/dhcp-static/static-west.json"

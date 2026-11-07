@@ -1,0 +1,28 @@
+#!/bin/bash
+# Regenerate the login motd: the gateway check output, the batman health
+# report and the cached software update status. Runs from cron every 5 minutes;
+# pam_motd only READS the result at login, so no check ever runs during a login.
+# The software update status comes from /var/lib/upstream-versions/summary.txt
+# (written by the daily upstream-versions-report job) — the network is never
+# reached at login.
+set -u
+
+out=$(mktemp /tmp/motd.XXXXXX) || exit 1
+
+{
+    /root/check-sanitized.sh 2>&1
+    echo
+    {{ batman_health }} --motd 2>&1
+    echo
+    # Software update status for components not delivered by Debian apt
+    # (source builds, git pins). Read from the cache written by the daily
+    # upstream-versions-report job; no network at login.
+    if [ -s "{{ upstream_versions_state_dir }}/summary.txt" ]; then
+        cat "{{ upstream_versions_state_dir }}/summary.txt"
+    else
+        echo "SOFTWARE UPDATES: no result yet (check runs daily)"
+    fi
+} > "$out"
+
+chmod 0644 "$out"
+mv -f "$out" /etc/motd.tail

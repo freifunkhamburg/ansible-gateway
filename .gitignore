@@ -1,0 +1,12 @@
+artifacts/
+.venv/
+# ansible-core 2.21 venv used for the Debian 13 hosts
+.venv-ansible/
+*.retry
+__pycache__/
+.vault_pass
+inventory.local.yml
+
+# operator vault (encrypted secrets) — never publish
+inventories/group_vars/all/vault.yml
+.venv-ansible

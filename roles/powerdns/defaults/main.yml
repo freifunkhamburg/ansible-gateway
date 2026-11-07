@@ -1,0 +1,70 @@
+---
+# Authoritative loopback DNS for the mesh (PowerDNS, Lua backend).
+#
+# Runs on a dedicated loopback address only; Knot Resolver forwards the
+# ffhh zone, the mesh reverse zones and the <region>.clients.hamburg
+# .freifunk.net zones here, so clients never talk to this server and no
+# firewall port is needed.  The Lua script (ffhh-synth.lua) answers the
+# community-transferred content verbatim (ffhh + 112.10.in-addr.arpa via
+# ffhh-dns-fetch) and synthesizes the gaps in the community hex naming:
+#   10.112.65.37    <-> 4125.sued.ffhh           (host part of the /16,
+#                                                 4 hex, under region label)
+#   2a03:2267:1::5  <-> ipv6-0000000000000005.sued.clients.hamburg.freifunk.net
+ffhh_dns_enabled: false
+
+ffhh_dns_listen: "127.0.0.2"
+ffhh_dns_port: 53
+ffhh_dns_unit: pdns.service
+ffhh_dns_conf: /etc/powerdns/pdns.conf
+ffhh_dns_lua: /etc/powerdns/ffhh-synth.lua
+
+ffhh_dns_clients_domain: clients.hamburg.freifunk.net
+ffhh_dns_ttl: 300
+ffhh_dns_soa_ns: dns01.ffhh.
+ffhh_dns_soa_hostmaster: hostmaster.hamburg.freifunk.net.
+# Serial for the locally generated zones (v6 reverse + clients); the
+# transferred zones report their upstream serial.
+ffhh_dns_soa_serial: 2026110501
+
+# --- authority over the mesh reverse zones ------------------------------
+# When a family is authoritative, the Lua backend claims that reverse zone
+# (dns_get_domaininfo -> kind NATIVE, SOA/NS answers) and kresd queries the
+# local PowerDNS as an authoritative server ({auth = true}) instead of a
+# recursive forwarder, so answers carry the AA bit and are not DNSSEC
+# validated.  When it is not authoritative, the zone is not claimed at all
+# and kresd forwards it to the community DNS (which serves the v4 snapshot
+# and the srv03 /64 delegation).
+ffhh_dns_authoritative: true
+ffhh_dns_authoritative_v4: "{{ ffhh_dns_authoritative }}"
+ffhh_dns_authoritative_v6: "{{ ffhh_dns_authoritative }}"
+
+# --- transferred community zones ----------------------------------------
+# srv01.hamburg.freifunk.net (dns01.ffhh), v4 + v6.  112.10.in-addr.arpa
+# and ffhh transfer cleanly; the region /64 reverse zones do NOT (delegated
+# to srv03, which refuses AXFR) and stay generated from the inventory.
+ffhh_dns_axfr_masters:
+  - "212.12.51.134"
+  - "2a00:14b0:4200:3380:134::1"
+ffhh_dns_axfr_zones:
+  - ffhh
+  - 112.10.in-addr.arpa
+ffhh_dns_fetch_bin: /usr/local/bin/ffhh-dns-fetch
+ffhh_dns_data: /var/lib/powerdns/ffhh-zones-data.lua
+ffhh_dns_fetch_interval: "15min"
+# How often the Lua backend stats/reloads the data file (seconds).
+ffhh_dns_reload_secs: 5
+
+# Community gateway names exist for the ordinals 1-3 only (gwNN-new.<region>
+# at the N-th ordinal address of each region /64, knoten at ::1).
+ffhh_dns_v6_gateway_ordinals: [1, 2, 3]
+
+# Addresses used by the role's verification (must carry no static record).
+ffhh_dns_test_v4: "10.112.65.37"
+ffhh_dns_test_v4_ptr: >-
+  {{ '%04x' | format((ffhh_dns_test_v4 | addr_only).split('.')[2] | int * 256
+                     + (ffhh_dns_test_v4 | addr_only).split('.')[3] | int)
+     }}.{{ (served_regions | first).id | regex_replace('^hh', '') }}.ffhh.
+ffhh_dns_test_v6: "2a03:2267:1::fefe"
+ffhh_dns_test_v6_ptr: >-
+  {{ ffhh_dns_test_v6 | v6_synth_ptr('ipv6-',
+     (served_regions | first).id | regex_replace('^hh', '') ~ '.' ~ ffhh_dns_clients_domain) }}

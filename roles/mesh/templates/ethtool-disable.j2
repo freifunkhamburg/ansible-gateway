@@ -1,0 +1,17 @@
+#!/bin/bash
+# Copied from roles/operations/templates/ethtool-disable.j2: the operations
+# role targets the Debian 13 base, but the interface hooks call this helper.
+if=$1
+
+ethtool -K $if gro off
+ethtool -K $if gso on
+ethtool -K $if tso on
+ethtool -K $if sg on
+ethtool -K $if lro off
+ethtool -K $if ufo on
+ethtool -K $if tx on
+ethtool -K $if rx off
+ethtool -K $if tx-gso-robust on
+ethtool -K $if tx-fcoe-segmentation off
+ethtool -K $if tx-gre-segmentation off
+ethtool -K $if tx-udp_tnl-segmentation off

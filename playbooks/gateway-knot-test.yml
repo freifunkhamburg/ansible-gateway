@@ -1,0 +1,20 @@
+---
+# Knot Resolver comparison/test instance (development tool).
+#
+# Re-creates the reference ffhh DNS setup (node/knoten/router, the NTP names
+# and their v4 aliases, per-region answers, the ffhh forward zones) in the
+# newest Knot Resolver release, listening on port 5353 as a reference instance.
+# The client-facing resolver is Knot Resolver on port 53 (roles/knot).
+#
+#   ansible-playbook playbooks/gateway-knot-test.yml --check --diff
+#   ansible-playbook playbooks/gateway-knot-test.yml
+#
+# Turn the comparison off with -e knot_test_verify=false, and make the
+# instance transient with -e knot_test_enable=false.
+- name: Configure Knot Resolver test instance
+  hosts: gw05
+  become: true
+  gather_facts: true
+  roles:
+    - regions
+    - knot_test

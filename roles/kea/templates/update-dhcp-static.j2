@@ -1,0 +1,28 @@
+#!/bin/bash
+# Pull the IP-reservation repository and reload Kea when it changed.
+# Self-contained variant of the reference update-dhcp-static (which sourced
+# /usr/local/include/ffnord-update.common); the cron contract is the same:
+# `update-dhcp-static pull` from /etc/cron.d/dhcp.
+set -u
+
+REPOSITORY="{{ kea_static_dir }}/"
+REPO="{{ kea_static_repo }}"
+
+case "${1:-}" in
+  pull)
+    cd "$REPOSITORY" || exit 1
+    before=$(git rev-parse HEAD 2>/dev/null || echo none)
+    git pull -q || exit 1
+    after=$(git rev-parse HEAD)
+    if [ "$before" != "$after" ]; then
+      /bin/systemctl try-reload-or-restart {{ kea_dhcp4_unit | default('kea-dhcp4-server.service') }}
+    fi
+    ;;
+  reload)
+    /bin/systemctl try-reload-or-restart {{ kea_dhcp4_unit | default('kea-dhcp4-server.service') }}
+    ;;
+  *)
+    echo "Usage: $(basename "$0") [pull|reload]" >&2
+    exit 2
+    ;;
+esac

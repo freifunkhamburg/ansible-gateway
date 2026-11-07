@@ -1,0 +1,73 @@
+# This file describes the network interfaces available on your system
+# and how to activate them. For more information, see interfaces(5).
+#
+# Debian 13 base: two NICs, matching the old role names (`intra-as`,
+# `uplink`) after the udev rename in 70-persistent-net.rules. There is no
+# local-dc / local-ms / dummy0 here; those are not present on gw05.
+#
+# The uplink is the transit /29 handed to this gateway; the upstream router is
+# the peer address in host_vars (`uplink_v4_peer`). If `uplink_v4` is not set
+# the interface is still brought UP as `inet manual` (link-local only) rather
+# than inventing a transit address.
+#
+# IPv6 on the uplink is deliberately LINK-LOCAL ONLY (`inet6 manual` below).
+# The uplink has no IPv6 transit prefix. Client v6 egress is therefore routed
+# by BIRD's
+# OSPFv3 `uplink6` protocol: the mesh table carries `default via <upstream
+# link-local> dev uplink`, and the upstream router reaches the mesh because
+# this gateway exports its region /64s (2a03:2267::/32{48,64}) into the uplink
+# OSPFv3 area. The upstream router must hold/route 2a03:2267::/32 for the
+# return path. Gateway-originated traffic (resolver, time daemon) uses intra-as
+# instead (its own v6 default).
+
+source /etc/network/interfaces.d/*
+
+# The loopback network interface
+auto lo
+iface lo inet loopback
+
+auto {{ intra_as_if }}
+iface {{ intra_as_if }} inet static
+  address {{ intra_as_v4 }}
+  gateway {{ intra_as_v4_gw }}
+  post-up /usr/local/bin/ethtool-disable $IFACE || true
+  post-up /sbin/sysctl -w net.ipv4.conf.$IFACE.arp_ignore=1
+  post-up /sbin/sysctl -w net.ipv4.conf.$IFACE.arp_announce=1
+  pre-up    /sbin/ip rule add pref 31000 fwmark 0x6 table main || true
+  pre-up    /sbin/ip -6 rule add pref 31000 fwmark 0x6 table main || true
+  post-down /sbin/ip rule del pref 31000 fwmark 0x6 table main || true
+  post-down /sbin/ip -6 rule del pref 31000 fwmark 0x6 table main || true
+
+iface {{ intra_as_if }} inet6 static
+  address {{ intra_as_v6 }}
+  gateway {{ intra_as_v6_gw }}
+  post-up /sbin/sysctl -w net.ipv6.conf.$IFACE.accept_ra=0
+  post-up /sbin/sysctl -w net.ipv6.conf.$IFACE.autoconf=0
+
+auto {{ uplink_if }}
+iface {{ uplink_if }} inet {{ 'static' if uplink_v4 is defined else 'manual' }}
+{% if uplink_v4 is defined %}
+  address {{ uplink_v4 }}
+{% endif %}
+  pre-up    /sbin/ip rule add pref 31000 iif $IFACE table mesh || true
+  pre-up    /sbin/ip rule add pref 31001 iif $IFACE unreachable || true
+  pre-up    /sbin/ip -6 rule add pref 31000 iif $IFACE table mesh || true
+  pre-up    /sbin/ip -6 rule add pref 31001 iif $IFACE unreachable || true
+  post-up /sbin/ip r replace {{ gw_transit_net }} dev $IFACE table 42
+  post-down /sbin/ip r del {{ gw_transit_net }} dev $IFACE table 42 || true
+  post-up /sbin/sysctl -w net.ipv4.conf.$IFACE.arp_ignore=1
+  post-up /sbin/sysctl -w net.ipv4.conf.$IFACE.arp_announce=1
+  # RA hardening on the uplink: no SLAAC address, no RA-provided default route.
+  # `all.accept_ra` in sysctl.d does not cover interfaces created later by
+  # ifupdown, so it is applied per interface here and via `default.*` above.
+  post-up /sbin/sysctl -w net.ipv6.conf.$IFACE.accept_ra=0
+  post-up /sbin/sysctl -w net.ipv6.conf.$IFACE.autoconf=0
+  post-up /usr/local/bin/ethtool-disable $IFACE || true
+  post-down /sbin/ip rule del pref 31000 iif $IFACE table mesh || true
+  post-down /sbin/ip rule del pref 31001 iif $IFACE unreachable || true
+  post-down /sbin/ip -6 rule del pref 31000 iif $IFACE table mesh || true
+  post-down /sbin/ip -6 rule del pref 31001 iif $IFACE unreachable || true
+
+# Link-local only: no v6 transit address, no v6 default route from here.
+# The v6 default comes from OSPFv3 (`default6`), not from this stanza.
+iface {{ uplink_if }} inet6 manual

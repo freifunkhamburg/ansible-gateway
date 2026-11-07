@@ -1,0 +1,415 @@
+---
+# fastd for the Debian 13 base: newest upstream release, then the configuration
+# shape (one common.conf, 8 instances named <region><NN>, one
+# secret per instance by default, systemd template unit).
+
+- name: Install fastd build dependencies
+  ansible.builtin.apt:
+    name: "{{ fastd_build_deps }}"
+    state: present
+    cache_valid_time: 3600
+
+- name: Resolve the newest upstream fastd release tag
+  ansible.builtin.shell: >-
+    git ls-remote --tags {{ fastd_repo }}
+    | awk '{print $2}' | sed 's#refs/tags/##'
+    | grep -E '^v[0-9]+$' | sort -V | tail -1
+  register: fastd_latest
+  changed_when: false
+  check_mode: false
+  when: fastd_tag | length == 0
+
+- name: Decide the tag this gateway must run
+  ansible.builtin.set_fact:
+    fastd_desired_tag: >-
+      {{ fastd_tag if fastd_tag | length > 0
+         else fastd_latest.stdout | trim }}
+
+- name: Read the installed fastd version (if any)
+  ansible.builtin.command: "{{ fastd_bin }} --version"
+  register: fastd_version
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Compare installed version with the desired release
+  ansible.builtin.set_fact:
+    fastd_installed_tag: >-
+      {{ fastd_version.stdout | regex_search('v[0-9]+') | default('', true) }}
+    fastd_rebuild: >-
+      {{ fastd_version.rc != 0 or
+         (fastd_version.stdout | regex_search('v[0-9]+') | default('', true))
+         != fastd_desired_tag }}
+
+- name: Ensure the fastd source/data directory exists
+  ansible.builtin.file:
+    path: /var/lib/fastd
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Clone or refresh fastd at the desired tag
+  ansible.builtin.shell: |
+    set -e
+    if [ -d "{{ fastd_build_dir }}/.git" ]; then
+      git -C "{{ fastd_build_dir }}" fetch --tags --depth 1 origin
+    else
+      git clone --branch "{{ fastd_desired_tag }}" --depth 1 \
+        "{{ fastd_repo }}" "{{ fastd_build_dir }}"
+    fi
+    git -C "{{ fastd_build_dir }}" checkout -f "{{ fastd_desired_tag }}"
+  when:
+    - fastd_rebuild | bool
+    - not ansible_check_mode
+
+- name: Configure the fastd build
+  ansible.builtin.shell: |
+    set -e
+    if [ -d build ]; then
+      meson setup --reconfigure build --buildtype=release --prefix=/usr
+    else
+      meson setup build --buildtype=release --prefix=/usr
+    fi
+  args:
+    chdir: "{{ fastd_build_dir }}"
+  when:
+    - fastd_rebuild | bool
+    - not ansible_check_mode
+
+- name: Compile fastd
+  ansible.builtin.command: ninja -C build
+  args:
+    chdir: "{{ fastd_build_dir }}"
+  when:
+    - fastd_rebuild | bool
+    - not ansible_check_mode
+
+- name: Install fastd to /usr/bin
+  ansible.builtin.command: meson install -C build
+  args:
+    chdir: "{{ fastd_build_dir }}"
+  when:
+    - fastd_rebuild | bool
+    - not ansible_check_mode
+
+- name: Verify the installed fastd release
+  ansible.builtin.command: "{{ fastd_bin }} --version"
+  register: fastd_version_after
+  changed_when: false
+  check_mode: false
+  failed_when: >-
+    fastd_version_after.rc != 0 or
+    (fastd_version_after.stdout | regex_search('v[0-9]+') | default('', true))
+    != fastd_desired_tag
+  when: not ansible_check_mode
+
+- name: Ensure the fastd system user/group exists
+  ansible.builtin.group:
+    name: "{{ fastd_common_conf.group }}"
+    system: true
+    state: present
+
+- name: Ensure the fastd system user exists
+  ansible.builtin.user:
+    name: "{{ fastd_common_conf.user }}"
+    group: "{{ fastd_common_conf.group }}"
+    system: true
+    create_home: false
+    shell: /usr/sbin/nologin
+    state: present
+
+- name: Derive this gateway's fastd instances (naming/port parity)
+  ansible.builtin.set_fact:
+    fastd_instances: >-
+      {{ served_regions | map('fastd_instances', gw_index | int) | flatten }}
+    fastd_secret_suffixes: >-
+      {{ served_regions | map('fastd_instances', gw_index | int) | flatten
+         | map(attribute='name') | map('regex_replace', '^.*([0-9]{2})$', '\1')
+         | unique | sort }}
+
+# --- secret-file table ---------------------------------------------------
+# instance scope: one keypair per instance (secret-<region><NN>.conf)
+# suffix scope:   one keypair per instance-number suffix (secret<NN>.conf),
+#                 shared by the four regions — the shared two-slot layout.
+- name: Assert the key scope is known
+  ansible.builtin.assert:
+    that:
+      - fastd_key_scope in ['instance', 'suffix']
+    fail_msg: >-
+      fastd_key_scope must be 'instance' or 'suffix',
+      got '{{ fastd_key_scope }}'.
+
+- name: Assert the derived instance count
+  ansible.builtin.assert:
+    that:
+      - fastd_instances | length == gw_expect_fastd_instances | int
+    fail_msg: >-
+      derived {{ fastd_instances | length }} instances, expected
+      {{ gw_expect_fastd_instances }} (8 = four regions x two slots).
+
+- name: Create the fastd configuration directories
+  ansible.builtin.file:
+    path: /etc/fastd
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create per-instance configuration directories
+  ansible.builtin.file:
+    path: "/etc/fastd/{{ item.name }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ fastd_instances }}"
+
+- name: Create the status socket and peer directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "0755"
+  loop:
+    - { path: "{{ fastd_status_socket_dir }}", owner: "{{ fastd_common_conf.user }}", group: "{{ fastd_common_conf.group }}" }
+    - { path: "{{ fastd_peer_dir }}", owner: root, group: root }
+
+- name: Render the peer identities
+  ansible.builtin.template:
+    src: peer.j2
+    dest: "{{ fastd_peer_dir }}/{{ item.name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ fastd_peers | default([]) }}"
+  notify: reload fastd
+
+- name: Render /etc/fastd/common.conf
+  ansible.builtin.template:
+    src: common.conf.j2
+    dest: /etc/fastd/common.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: reload fastd
+
+- name: Render the per-instance fastd.conf files
+  ansible.builtin.template:
+    src: "{{ 'fastd-instance.conf.j2' if fastd_key_scope == 'instance' else 'fastd-suffix.conf.j2' }}"
+    dest: "/etc/fastd/{{ item.name }}/fastd.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ fastd_instances }}"
+  notify: reload fastd
+
+- name: Check the secrets the operator must supply
+  ansible.builtin.assert:
+    that:
+      - fastd_secrets is defined
+      - >-
+        (fastd_instances | map(attribute='name') | list
+         if fastd_key_scope == 'instance' else fastd_secret_suffixes)
+        | difference(fastd_secrets.keys() | list) | length == 0
+    fail_msg: >-
+      fastd_secrets must provide a secret for every
+      {{ 'instance' if fastd_key_scope == 'instance' else 'suffix' }}:
+      {{ fastd_instances | map(attribute='name') | list
+         if fastd_key_scope == 'instance' else fastd_secret_suffixes }}
+      (from ansible-vault).
+  when: fastd_start | bool
+
+- name: Render one secret file per instance (instance key scope)
+  ansible.builtin.template:
+    src: secret.conf.j2
+    dest: "/etc/fastd/secret-{{ item.name }}.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ fastd_instances }}"
+  when:
+    - fastd_key_scope == 'instance'
+    - fastd_secrets is defined
+  notify: reload fastd
+
+- name: Render one secret file per suffix (suffix key scope)
+  ansible.builtin.template:
+    src: secret.conf.j2
+    dest: "/etc/fastd/secret{{ item }}.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ fastd_secret_suffixes }}"
+  when:
+    - fastd_key_scope == 'suffix'
+    - fastd_secrets is defined
+  notify: reload fastd
+
+- name: Install the fastd@.service template unit
+  ansible.builtin.template:
+    src: fastd@.service.j2
+    dest: /lib/systemd/system/fastd@.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: reload fastd
+
+# /run is tmpfs: the status socket directory exists during the run because
+# the role creates it, but nothing recreates it at boot, so every fastd unit
+# would start against a missing directory and exit with
+# "unable to open status socket lock file". A tmpfiles.d entry restores it in
+# sysinit.target, which runs before network/multi-user.target.
+- name: Install the tmpfiles entry for the status socket directory
+  ansible.builtin.template:
+    src: tmpfiles.conf.j2
+    dest: /etc/tmpfiles.d/fastd.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Apply the tmpfiles entry now (boot will do the same)
+  ansible.builtin.command:
+    cmd: /usr/bin/systemd-tmpfiles --create /etc/tmpfiles.d/fastd.conf
+  register: fastd_tmpfiles
+  changed_when: false
+
+- name: Stat the status socket directory
+  ansible.builtin.stat:
+    path: "{{ fastd_status_socket_dir }}"
+  register: fastd_status_stat
+
+- name: Assert the status socket directory exists with the right owner
+  ansible.builtin.assert:
+    that:
+      - fastd_status_stat.stat.exists
+      - fastd_status_stat.stat.isdir
+      - fastd_status_stat.stat.pw_name == fastd_common_conf.user
+      - fastd_status_stat.stat.gr_name == fastd_common_conf.group
+    fail_msg: >-
+      {{ fastd_status_socket_dir }} is {{ 'missing' if not fastd_status_stat.stat.exists
+                                          else 'not owned by ' ~ fastd_common_conf.user }};
+      fastd cannot create its status socket and the instances will exit.
+
+
+- name: Assert the batman interfaces exist before attaching tunnels
+  ansible.builtin.stat:
+    path: "/sys/class/net/{{ item.bat_if }}"
+  loop: "{{ served_regions }}"
+  register: bat_ifaces
+
+- name: Fail when a region's batman interface is missing
+  ansible.builtin.assert:
+    that:
+      - bat_ifaces.results | selectattr('stat.exists', 'equalto', false) | list | length == 0
+    fail_msg: >-
+      A bat-<region> interface is missing: run the mesh playbook (step 2)
+      before attaching the fastd tunnels.
+
+# --- persistent TAP pattern ------------------------------------------------
+# A TAP created by fastd itself is non-persistent and loses its MAC on every
+# restart, so it is converted to a persistent `ip tuntap` device once. The
+# MAC is set explicitly and the device stays attached to the mesh.
+- name: Ensure each fastd TAP is a persistent tap device
+  ansible.builtin.shell: |
+    set -u
+    IF={{ item.iface }}
+    if ip link show dev "$IF" >/dev/null 2>&1 && ip -d link show dev "$IF" | grep -q 'persist on'; then
+      exit 0
+    fi
+    systemctl stop fastd@{{ item.name }} >/dev/null 2>&1 || true
+    ip link del "$IF" 2>/dev/null || true
+    ip tuntap add dev "$IF" mode tap
+    ip link set dev "$IF" address {{ item.mac }} up
+    echo recreated
+  loop: "{{ fastd_instances }}"
+  register: tap_persist
+  changed_when: "'recreated' in tap_persist.stdout"
+
+- name: Attach each fastd TAP to its batman mesh
+  ansible.builtin.shell: |
+    set -u
+    IF={{ item.iface }}
+    BAT={{ item.bat_if }}
+    ip link set dev "$IF" up
+    if {{ batctl_path }} meshif "$BAT" interface | grep -q "^$IF: active"; then
+      exit 0
+    fi
+    {{ batctl_path }} meshif "$BAT" interface add "$IF" >/dev/null
+    echo attached
+  loop: "{{ fastd_instances }}"
+  register: tap_attach
+  changed_when: "'attached' in tap_attach.stdout"
+
+- name: Enable and start the fastd instances
+  ansible.builtin.service:
+    name: "fastd@{{ item.name }}"
+    state: started
+    enabled: true
+  loop: "{{ fastd_instances }}"
+  when:
+    - fastd_start | bool
+    - fastd_secrets is defined
+
+- name: Confirm the expected tunnel MACs and link state on the TAPs
+  ansible.builtin.command:
+    cmd: "ip link set dev {{ item.iface }} address {{ item.mac }} up"
+  loop: "{{ fastd_instances }}"
+  when:
+    - fastd_start | bool
+    - fastd_secrets is defined
+  changed_when: false
+
+- name: Verify every fastd instance is running
+  ansible.builtin.command:
+    cmd: "systemctl is-active fastd@{{ item.name }}"
+  loop: "{{ fastd_instances }}"
+  register: fastd_active
+  changed_when: false
+  retries: 3
+  delay: 2
+  until: fastd_active.stdout | trim == 'active'
+  when:
+    - fastd_start | bool
+    - fastd_secrets is defined
+
+- name: Assert every fastd instance is active
+  ansible.builtin.assert:
+    that:
+      - item.stdout | trim == 'active'
+    fail_msg: "fastd@{{ item.item.name }} is '{{ item.stdout | trim }}'"
+  loop: "{{ fastd_active.results | default([]) }}"
+  when:
+    - fastd_start | bool
+    - fastd_secrets is defined
+
+- name: Stat the per-instance status sockets
+  ansible.builtin.stat:
+    path: "{{ fastd_status_socket_dir }}/fastd-status.{{ item.iface | replace('vpn-', '') }}.sock"
+  loop: "{{ fastd_instances }}"
+  register: fastd_sockets
+  when:
+    - fastd_start | bool
+    - fastd_secrets is defined
+
+- name: Assert each instance wrote its status socket
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+    fail_msg: >-
+      {{ item.stat.path }} is missing for fastd@{{ item.item.name }};
+      the instance started outside {{ fastd_status_socket_dir }}.
+  loop: "{{ fastd_sockets.results | default([]) }}"
+  when:
+    - fastd_start | bool
+    - fastd_secrets is defined
+
+- name: Report the gated state when no secrets are supplied
+  ansible.builtin.debug:
+    msg: >-
+      fastd {{ fastd_desired_tag }} is installed and configured for
+      {{ fastd_instances | length }} instances, but NOT started:
+      no operator secrets (fastd_secrets) are available. Supply them via
+      ansible-vault and set fastd_start=true to bring the tunnels up.
+  when: not (fastd_start | bool and fastd_secrets is defined)

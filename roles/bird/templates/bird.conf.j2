@@ -1,0 +1,321 @@
+# BIRD 3 configuration for the Debian 13 base.
+#
+# Ported from the reference BIRD 1.6 pair (bird.conf + bird6.conf). Differences
+# required by BIRD 3:
+#   - one daemon, v4 and v6 as channels (ipv4 { } / ipv6 { })
+#   - tables are per AFI and may not be declared twice with one name, so the
+#     old shared `mesh` / `kernel_main` / `mesh_ffhh` tables become
+#     mesh4/mesh6, kmain4/kmain6, mesh_ffhh4/mesh_ffhh6
+#   - static routes use `unreachable` instead of the BIRD 1.6 `reject`
+#   - OSPF is `protocol ospf v2` / `protocol ospf v3`
+#   - `source address`, `local as` and `direct` stay protocol options; channel
+#     options (import/export, next hop self, gateway direct) move into the
+#     channel block.
+
+router id {{ router_id }};
+
+# ----------------------------------------------------------------------
+# Tables
+# ----------------------------------------------------------------------
+ipv4 table mesh4;
+ipv6 table mesh6;
+ipv4 table kmain4;
+ipv6 table kmain6;
+ipv4 table mesh_ffhh4;
+ipv6 table mesh_ffhh6;
+
+# ----------------------------------------------------------------------
+# Filters (ported 1:1 from the reference functions)
+# ----------------------------------------------------------------------
+function is_ula() { return (net ~ [ fc00::/7{48,64} ]); };
+function is_default4() { return (net ~ [ 0.0.0.0/0 ]); };
+function is_default6() { return (net ~ [ ::0/0 ]); };
+function is_freifunk4() { return (net ~ [ 10.0.0.0/8+ ]); };
+function is_chaos() {
+  return (net ~ [ 10.4.0.0/16+, 10.32.0.0/16+, 10.100.0.0/14+, 10.104.0.0/14+, 172.31.0.0/16+ ]);
+};
+function is_dn42() { return (net ~ [ 172.20.0.0/14+, 172.16.0.0/14+ ]); };
+function is_freifunk6() {
+  return (net ~ [ 2001:0bf7::/32+, 2a03:2260::/29+, 2001:67c:2d50::/48 ]);
+};
+function is_ouradditional() { return (net ~ [ 10.112.0.0/16{18,32} ]); };
+function is_ourpublic() { return (net ~ [ 2a03:2267::/32{48,64} ]); };
+function is_dnssite() { return (net ~ [ FEC0:0:0:FFFF::/64+ ]); };
+
+# ----------------------------------------------------------------------
+# Kernel sync: table 42 (mesh) and the OS main table
+# ----------------------------------------------------------------------
+protocol kernel kernel_mesh4 {
+  scan time 20;
+  kernel table 42;
+  ipv4 { import none; export all; };
+}
+
+protocol kernel kernel_mesh6 {
+  scan time 20;
+  kernel table 42;
+  ipv6 { import none; export all; };
+}
+
+# Old bird.conf: kernel_main exported everything from master except static
+# device routes and the default route. Here the routes are exported from the
+# kmain4/kmain6 tables, which are fed from mesh by the pipes below.
+protocol kernel kernel_main4 {
+  scan time 20;
+  persist;
+  ipv4 { table kmain4; import none; export where source != RTS_STATIC_DEVICE && !is_default4(); };
+}
+
+protocol kernel kernel_main6 {
+  scan time 20;
+  persist;
+  ipv6 { table kmain6; import none; export where source != RTS_DEVICE && source != RTS_STATIC_DEVICE && !is_default6(); };
+}
+
+protocol device {
+  scan time 10;
+}
+
+# mesh -> master (never back): the reference config fed the master table from
+# mesh and exported master to kernel table 42; RADV also reads the default
+# route from master.
+protocol pipe pipe_master_mesh4 {
+  table master4;
+  peer table mesh4;
+  import all;
+  export none;
+}
+
+protocol pipe pipe_master_mesh6 {
+  table master6;
+  peer table mesh6;
+  import all;
+  export none;
+}
+
+# mesh -> kmain (never back)
+protocol pipe pipe_kernel_main_mesh4 {
+  table kmain4;
+  peer table mesh4;
+  import all;
+  export none;
+}
+
+protocol pipe pipe_kernel_main_mesh6 {
+  table kmain6;
+  peer table mesh6;
+  import where ! is_default6();
+  export none;
+}
+
+# v6 direct routes for the gateway intra-as interface:
+# dummy0 is not included.
+protocol direct direct6 {
+  ipv6 { table mesh6; };
+  interface "{{ intra_as_if }}";
+}
+
+# ----------------------------------------------------------------------
+# Community tables (ffhh)
+# ----------------------------------------------------------------------
+protocol static static_ffhh4 {
+  ipv4 { table mesh_ffhh4; };
+  route 10.112.0.0/16 unreachable;
+}
+
+protocol static local_ffhh4 {
+  ipv4 { table mesh_ffhh4; };
+{% for r in served_regions | sort(attribute='region_index', reverse=True) %}
+  route {{ r.v4_net }} via "{{ r.bat_if }}";
+{% endfor %}
+}
+
+protocol pipe pipe_mesh_ffhh4 {
+  table mesh4;
+  peer table mesh_ffhh4;
+  import all;
+  export where source = RTS_BGP || source = RTS_STATIC;
+}
+
+protocol static static_ffhh6 {
+  ipv6 { table mesh_ffhh6; };
+{% for r in served_regions | sort(attribute='region_index', reverse=True) %}
+  route {{ r.v6_site }} unreachable;
+{% endfor %}
+}
+
+protocol static local_ffhh6 {
+  ipv6 { table mesh_ffhh6; };
+{% for r in served_regions | sort(attribute='region_index', reverse=True) %}
+  route {{ r.v6_prefix }} via "{{ r.bat_if }}";
+{% endfor %}
+}
+
+protocol pipe pipe_mesh_ffhh6 {
+  table mesh6;
+  peer table mesh_ffhh6;
+  import all;
+  export where source = RTS_BGP || source = RTS_STATIC_DEVICE || source = RTS_STATIC;
+}
+
+# ----------------------------------------------------------------------
+# BGP (v6 sessions carrying the ffhh routes; v4 has no BGP sessions)
+# ----------------------------------------------------------------------
+template bgp local_mesh {
+  ipv6 {
+    import where is_ula() || is_freifunk6() || is_default6();
+    export where source = RTS_BGP || source = RTS_STATIC_DEVICE || source = RTS_STATIC;
+    gateway direct;
+    next hop self;
+  };
+  direct;
+}
+
+template bgp local_mesh_ffhh from local_mesh {
+  ipv6 { table mesh_ffhh6; };
+  source address {{ bird_bgp_source_v6 }};
+  local as {{ bird_local_as }};
+}
+
+{% for p in bird_bgp_neighbors_v6 %}
+protocol bgp {{ p.name }} from local_mesh_ffhh {
+  neighbor {{ p.address }} as {{ bird_local_as }};
+}
+
+{% endfor %}
+
+# ----------------------------------------------------------------------
+# OSPF v2 (mesh + uplink)
+# ----------------------------------------------------------------------
+protocol static natips {
+  ipv4 { table mesh4; import all; };
+{% for a in dummy_v4_addresses %}
+  route {{ a }} unreachable;
+{% endfor %}
+{% for h in mesh_forward_hosts %}
+  route {{ h.dest }} via {{ h.via }}; #{{ h.label }}
+{% endfor %}
+  route {{ gw_public_net }} via {{ intra_as_v4_gw }};
+}
+
+protocol ospf v2 ouplink {
+  ipv4 {
+    table mesh4;
+    import where is_default4() || is_ouradditional();
+    export filter {
+      if proto = "natips" then { ospf_metric1 = {{ gw_ospf_metric_nat4 }}; accept; }
+      reject;
+    };
+  };
+  area 0.0.0.0 {
+    networks {
+{% for n in ospf_v4_networks %}
+      {{ n }};
+{% endfor %}
+    };
+{% for r in served_regions | sort(attribute='ospf_index') %}
+{% if r.ospf_nbma %}
+    interface "{{ r.bat_if }}" {
+      type nbma;
+      priority 200;
+      cost {{ gw_ospf_cost_v4_nbma }};
+      strict nonbroadcast yes;
+{% if gw_ospf_v4_neighbors is defined %}
+      neighbors {
+{% for n in gw_ospf_v4_neighbors %}
+        {{ n.addr }} eligible; #{{ n.label }}
+{% endfor %}
+      };
+{% endif %}
+    };
+{% else %}
+    interface "{{ r.bat_if }}" { stub yes; cost {{ gw_ospf_cost_v4_stub }}; };
+{% endif %}
+{% endfor %}
+{% if uplink_addressed %}
+    interface "{{ uplink_if }}" {
+      type broadcast;
+    };
+{% endif %}
+  };
+}
+
+# ----------------------------------------------------------------------
+# OSPF v3 (mesh + uplink)
+# ----------------------------------------------------------------------
+protocol ospf v3 uplink6 {
+  ipv6 {
+    table mesh6;
+    import where is_default6() || is_ourpublic() || is_dnssite();
+    export filter {
+      if proto = "static_ffhh6" then { ospf_metric2 = {{ gw_ospf_metric_e2 }}; accept; }
+      if net ~ [ 2a03:2267::/32{32,64}, FEC0:0:0:FFFF::/64{128,128} ] then {
+        ospf_metric1 = {{ gw_ospf_metric_ext6 }};
+        accept;
+      }
+      reject;
+    };
+  };
+  area 0.0.0.0 {
+    networks {
+      2a03:2267::/32;
+    };
+{% for r in served_regions | sort(attribute='ospf_index') %}
+{% if r.ospf_nbma %}
+    interface "{{ r.bat_if }}" {
+      type nbma;
+      cost {{ gw_ospf_cost_v6_nbma }};
+      strict nonbroadcast yes;
+{% if gw_ospf_v6_neighbors is defined %}
+      neighbors {
+{% for n in gw_ospf_v6_neighbors %}
+        {{ n.addr }} eligible; #{{ n.label }}
+{% endfor %}
+      };
+{% endif %}
+    };
+{% else %}
+    interface "{{ r.bat_if }}" { stub yes; cost {{ gw_ospf_cost_v6_stub }}; };
+{% endif %}
+{% endfor %}
+{% if uplink_addressed %}
+    interface "{{ uplink_if }}" {
+      type broadcast;
+      cost 10;
+      hello 10;
+      dead 40;
+    };
+{% endif %}
+  };
+}
+
+# ----------------------------------------------------------------------
+# Router advertisements
+# ----------------------------------------------------------------------
+protocol radv {
+  trigger ::/0;
+  ipv6 { export where is_default6(); };
+{% for r in served_regions | sort(attribute='region_index', reverse=True) %}
+  interface "{{ r.bat_if }}" {
+    max ra interval 600;
+    min ra interval 450;
+    other config on;
+    min delay 10;
+    link mtu 1280;
+    reachable time 900000;
+    current hop limit 64;
+    default lifetime 1800;
+    default preference medium;
+
+    prefix {{ r.v6_prefix }} {
+      preferred lifetime 2700;
+      valid lifetime 5400;
+      autonomous on;
+    };
+    rdnss {
+      lifetime 1200;
+      ns {{ r.v6_host }};
+    };
+  };
+{% endfor %}
+}

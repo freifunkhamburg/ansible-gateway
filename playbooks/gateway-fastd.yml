@@ -1,0 +1,15 @@
+---
+# Start fastd instances with the operator-supplied secrets.
+#
+# The full gateway run renders the fastd configuration but does not start
+# instances without secrets. Use this playbook for the secrets-enabled run:
+#
+#   ansible-playbook playbooks/gateway-fastd.yml \
+#       -e fastd_start=true --ask-vault-pass
+- name: Configure fastd tunnels
+  hosts: gw05
+  become: true
+  gather_facts: false
+  roles:
+    - regions
+    - fastd

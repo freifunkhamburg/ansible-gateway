@@ -1,0 +1,42 @@
+{#
+  Unbound for the Debian 13 base. Listening addresses are this gateway's
+  identity: loopback plus its own address in every served region. Outgoing
+  queries leave via intra-as.
+#}
+server:
+verbosity: 0
+num-threads: 4
+interface: 127.0.0.1
+interface: ::1
+{% for r in served_regions %}
+interface: {{ r.v4_host }}
+{% endfor %}
+{% for r in served_regions %}
+interface: {{ r.v6_host }}
+{% endfor %}
+outgoing-interface: {{ unbound_outgoing_v4 }}
+outgoing-interface: {{ unbound_outgoing_v6 }}
+outgoing-range: 8192
+outgoing-port-avoid: "1-32767"
+so-rcvbuf: 80m
+so-sndbuf: 80m
+so-reuseport: yes
+msg-cache-size: 50m
+msg-cache-slabs: 4
+num-queries-per-thread: 4096
+rrset-cache-size: 100m
+rrset-cache-slabs: 4
+infra-cache-slabs: 4
+key-cache-slabs: 4
+{% for a in unbound_access_control %}
+access-control: {{ a.net }} {{ a.action }}
+{% endfor %}
+chroot: "/var/lib/unbound"
+username: "unbound"
+prefetch: yes
+prefetch-key: yes
+extended-statistics: yes
+statistics-cumulative: no
+statistics-interval: 0
+
+include: "/etc/unbound/unbound.conf.d/*.conf"

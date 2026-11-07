@@ -1,0 +1,9 @@
+# gw04 — address reservation reference.
+#
+# VXLAN/address peer only: it is not part of the local BGP full mesh
+# (`bgp_peer: false` in the gateway registry).
+
+gw_index: 4
+ffhh_host_name: gw04
+
+intra_as_v4: "193.96.224.214/29"

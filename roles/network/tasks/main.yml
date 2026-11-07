@@ -1,0 +1,208 @@
+---
+# Step 1: network interfaces: identity of the two NICs, bringing the
+# uplink up, and the parts both of them need (rt_tables mapping for the mesh
+# table, persistent NIC names).
+#
+# This role intentionally does NOT render batman/fastd/VXLAN interfaces or
+# BIRD configuration. Those are later steps (see docs/architecture.md).
+
+
+- name: Create iproute2 table directory
+  ansible.builtin.file:
+    path: /etc/iproute2/rt_tables.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Map kernel table 42 to the name `mesh`
+  ansible.builtin.copy:
+    dest: /etc/iproute2/rt_tables.d/mesh.conf
+    content: "42 mesh\n"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Create udev rules directory
+  ansible.builtin.file:
+    path: /etc/udev/rules.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Write persistent NIC-name rules
+  ansible.builtin.template:
+    src: 70-persistent-net.rules.j2
+    dest: /etc/udev/rules.d/70-persistent-net.rules
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Render /etc/network/interfaces
+  ansible.builtin.template:
+    src: interfaces.j2
+    dest: /etc/network/interfaces
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Ensure /etc/network/interfaces.d exists
+  ansible.builtin.file:
+    path: /etc/network/interfaces.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render the published NAT addresses on dummy0
+  ansible.builtin.template:
+    src: interface-loopback.j2
+    dest: /etc/network/interfaces.d/loopback
+    owner: root
+    group: root
+    mode: "0644"
+
+# Rename the live devices as well, so the names are correct before the next
+# boot. Renaming a netdev keeps its addresses and the kernel routes that point
+# at it, so the SSH session on 193.96.224.213 survives.
+# Rename by MAC, so the role does not depend on the current ensX names.
+- name: Rename the NIC carrying intra-as to intra-as
+  ansible.builtin.shell:
+    cmd: |
+      cur=$(ip -br link | awk -v mac="{{ gw_nic_names[0].mac }}" '$3==mac {print $1}')
+      if [ -n "$cur" ] && [ "$cur" != "{{ gw_nic_names[0].name }}" ]; then
+        ip link set dev "$cur" name "{{ gw_nic_names[0].name }}"
+        echo renamed
+      fi
+    executable: /bin/bash
+  when: gw_nic_rename | default(false) | bool
+  register: rename_intra_as
+  changed_when: "'renamed' in rename_intra_as.stdout | default('')"
+  failed_when: false
+
+- name: Rename the NIC carrying uplink to uplink
+  ansible.builtin.shell:
+    cmd: |
+      cur=$(ip -br link | awk -v mac="{{ gw_nic_names[1].mac }}" '$3==mac {print $1}')
+      if [ -n "$cur" ] && [ "$cur" != "{{ gw_nic_names[1].name }}" ]; then
+        ip link set dev "$cur" name "{{ gw_nic_names[1].name }}"
+        echo renamed
+      fi
+    executable: /bin/bash
+  when: gw_nic_rename | default(false) | bool
+  register: rename_uplink
+  changed_when: "'renamed' in rename_uplink.stdout | default('')"
+  failed_when: false
+
+# intra-as already carries its address; bringing it "up" again via ifup would
+# try to re-add that address and fail before the hooks run. So the address is
+# left alone here and only the new per-interface extras are applied; the
+# interfaces file takes care of the full configuration at the next boot.
+- name: Apply intra-as extras (fwmark rule, ARP settings)
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      /sbin/ip rule add pref 31000 fwmark 0x6 table main 2>/dev/null || true
+      /sbin/ip -6 rule add pref 31000 fwmark 0x6 table main 2>/dev/null || true
+      /sbin/sysctl -q -w net.ipv4.conf.{{ intra_as_if }}.arp_ignore=1
+      /sbin/sysctl -q -w net.ipv4.conf.{{ intra_as_if }}.arp_announce=1
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+
+# A bare `ifup` treats an interface that already has an address as configured
+# and skips the post-up hooks, which is where the transit /29 route into table 42
+# is added. So the uplink is only cycled when its address does not match the
+# configured one; otherwise the missing hook is applied directly. The uplink
+# carries no remote access, so cycling it is safe.
+- name: Apply the uplink address (cycle only when it differs)
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      cur=$(ip -4 -o addr show dev {{ uplink_if }} 2>/dev/null | awk '{print $4}')
+      if [ "$cur" != "{{ uplink_v4 }}" ]; then
+        /sbin/ifdown {{ uplink_if }} || true
+        /sbin/ifup {{ uplink_if }}
+      fi
+    executable: /bin/bash
+  when: uplink_v4 is defined
+  register: ifup_result
+  changed_when: false
+  failed_when: false
+
+# The post-up hook cannot run when ifupdown considers the interface already
+# configured, so the transit route into table 42 is applied unconditionally.
+- name: Ensure the transit /29 route is in the mesh table
+  ansible.builtin.command:
+    cmd: "/sbin/ip r replace {{ gw_transit_net }} dev {{ uplink_if }} table 42"
+  changed_when: false
+
+# dummy0 is created by ifupdown's pre-up hook; ifup is a no-op once the
+# interface is configured, so the missing addresses are added directly.
+- name: Ensure the published NAT addresses on dummy0
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      /sbin/ip link add {{ dummy_if }} type dummy 2>/dev/null || true
+      /sbin/ip link set {{ dummy_if }} up
+      for a in {{ dummy_v4_addresses | map('regex_replace', '/32$', '') | join(' ') }}; do
+        /sbin/ip a replace "$a/32" dev {{ dummy_if }}
+      done
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+
+- name: Bring the uplink up (no address configured)
+  ansible.builtin.command:
+    cmd: "/sbin/ifup {{ uplink_if }}"
+  when: uplink_v4 is not defined
+  register: ifup_result
+  changed_when: true
+  failed_when: false
+
+# RA hardening sweep. `net.ipv6.conf.all.*` in sysctl.d is applied at boot,
+# before ifupdown creates these devices, and it never retroactively covers
+# interfaces that already exist. So every non-loopback interface is pinned
+# here: no SLAAC address, no RA-provided default route. This is what keeps the
+# uplink link-local-only and the bat/mesh/dummy devices RA-inert.
+- name: Disable accept_ra/autoconf on every real interface
+  ansible.builtin.shell:
+    cmd: |
+      set -u
+      for i in $(ip -o link show | awk -F': ' '{print $2}' | sed 's/@.*//'); do
+        [ "$i" = "lo" ] && continue
+        /sbin/sysctl -q -w net.ipv6.conf.$i.accept_ra=0
+        /sbin/sysctl -q -w net.ipv6.conf.$i.autoconf=0
+      done
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+
+- name: Report step 1 uplink state
+  ansible.builtin.debug:
+    msg: "{{ ifup_result.stdout_lines | default([]) + ifup_result.stderr_lines | default([]) }}"
+
+# Persisting across reboot needs the udev rules plus a boot. That is opt-in:
+# renaming the NIC carrying SSH is safe in principle, but a boot with a broken
+# interface config would lose remote access, so it is kept as a separate
+# deliberate action.
+- name: Reboot so the udev names are applied at boot
+  ansible.builtin.reboot:
+    msg: "Rebooting to apply the intra-as/uplink udev names"
+    reboot_timeout: 300
+    connect_timeout: 30
+    test_command: "ip link show intra-as"
+  when:
+    - gw_nic_rename | default(false) | bool
+    - gw_nic_rename_reboot | default(false) | bool
+
+- name: Confirm the renamed interfaces are up and addressed
+  ansible.builtin.command: ip -br addr
+  register: link_state
+  changed_when: false
+  failed_when: false
+
+- name: Report interface state
+  ansible.builtin.debug:
+    var: link_state.stdout_lines

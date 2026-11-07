@@ -1,0 +1,47 @@
+---
+# Shared build for the Knot Resolver instances (production and test).
+#
+# Debian Debian 13 only ships knot-resolver 5.7.5, so "latest" means the newest
+# upstream release, built from source with meson (same pattern as
+# roles/fastd).
+
+# Upstream repository and tag policy. Empty tag means "newest tag".
+knot_repo: "https://github.com/CZ-NIC/knot-resolver"
+knot_tag: ""
+knot_build_dir: /var/lib/knot-resolver/src
+knot_prefix: /usr/local
+# Plain lib, not multiarch: /usr/local/lib is on ld.so.conf, and it keeps the
+# built libkres away from any distro multiarch copy.
+knot_libdir: lib
+knot_bin: /usr/local/sbin/kresd
+knot_build_opts:
+  - --buildtype=release
+  - --prefix={{ knot_prefix }}
+  - --libdir={{ knot_libdir }}
+  # Trust-anchor updates need a writable keyfile directory; the instances run
+  # as an unprivileged user, so TA management is off (root.keys is installed
+  # read-only by meson).
+  - -Dmanaged_ta=disabled
+knot_build_deps:
+  - build-essential
+  - meson
+  - ninja-build
+  - pkg-config
+  - git
+  - python3
+  - luajit
+  - libluajit-5.1-dev
+  - libknot-dev
+  - libuv1-dev
+  - libgnutls28-dev
+  - liblmdb-dev
+  - libnghttp2-dev
+  - libcap-ng-dev
+  - libsystemd-dev
+# The distro packages must not coexist: their libkres.so.9 would be picked up
+# instead of the built one (undefined symbol: KR_RULE_OPTS_DEFAULT).
+knot_distro_packages:
+  - knot-resolver
+  - knot-resolver-module-http
+# Runtime Lua tree the binary loads; used by the rebuild decision.
+knot_runtime_dir: "{{ knot_prefix }}/lib/knot-resolver"

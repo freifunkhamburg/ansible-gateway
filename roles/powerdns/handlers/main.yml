@@ -1,0 +1,24 @@
+---
+- name: Refresh community zone data
+  ansible.builtin.systemd_service:
+    name: ffhh-dns-fetch.service
+    state: restarted
+    daemon_reload: true
+  # The Lua backend reloads the data file within ffhh_dns_reload_secs, so
+  # no pdns restart is needed for content changes.
+  when: not ansible_check_mode
+
+- name: Restart powerdns
+  ansible.builtin.systemd_service:
+    name: "{{ ffhh_dns_unit }}"
+    state: restarted
+    daemon_reload: true
+
+- name: Restart knot resolver for the reverse flush
+  ansible.builtin.systemd_service:
+    name: "{{ knot_unit | default('knot-resolver.service') }}"
+    state: restarted
+  # The resolver caches negative answers (tmpfs, so a restart is the flush);
+  # freshly synthesized PTRs would stay NXDOMAIN until the cached SOA minimum
+  # expires.
+  listen: Flush resolver negative cache

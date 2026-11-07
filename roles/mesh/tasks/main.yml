@@ -1,0 +1,113 @@
+---
+# batman mesh: build the pinned release, then create the bat / VXLAN
+# interfaces for every served region.
+#
+# No fastd tunnels are created here: peer secrets are operator-supplied. The
+# gateway joins the mesh over the VXLAN links through intra-as, which is what
+# all gateways do between each other; fastd is the wider transport.
+
+- name: Build and install batman-adv / batctl
+  ansible.builtin.include_role:
+    name: batman_build
+
+- name: Render ethtool-disable helper
+  ansible.builtin.template:
+    src: ethtool-disable.j2
+    dest: /usr/local/bin/ethtool-disable
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Ensure /etc/network/interfaces.d exists
+  ansible.builtin.file:
+    path: /etc/network/interfaces.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# --- mesh interfaces ---------------------------------------------------
+- name: Render one interfaces file per served region
+  ansible.builtin.template:
+    src: interface-region.j2
+    dest: "/etc/network/interfaces.d/{{ r.interface_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ served_regions }}"
+  loop_control:
+    loop_var: r
+
+- name: Bring up the bat and mesh interfaces of each region
+  ansible.builtin.command:
+    cmd: "/sbin/ifup {{ item.bat_if }} mesh-{{ item.id }}"
+  loop: "{{ served_regions }}"
+  register: ifup_result
+  # ifup on an already-configured interface exits 0 saying so; only a real
+  # state transition counts as changed.
+  changed_when: ifup_result.stdout is search('Configuring|Creating|Bringing up|adding')
+  failed_when: false
+
+- name: Report ifup result
+  ansible.builtin.debug:
+    msg: "{{ ifup_result.results | map(attribute='stderr') | list }}"
+  when: ifup_result.results | map(attribute='rc') | select('ne', 0) | list | length > 0
+
+# ifup is not a reliable re-attach: once mesh-<region> is recorded as
+# configured in /run/ifstate, `ifup bat-<region> mesh-<region>` skips the whole
+# mesh stanza, and a bat device that was recreated by `ifdown bat-<region>` /
+# `ifup bat-<region>` ends up without its VXLAN hardif. Attach explicitly and
+# fail loudly if the attachment did not take.
+- name: Ensure the region VXLAN is an active hardif of its batman mesh
+  ansible.builtin.shell: |
+    set -u
+    IF=mesh-{{ r.id }}
+    BAT={{ r.bat_if }}
+    B={{ batctl_path }}
+    ip link set dev "$IF" up
+    if $B meshif "$BAT" interface | grep -q "^$IF: active"; then
+      exit 0
+    fi
+    $B meshif "$BAT" interface add "$IF" >/dev/null
+    if $B meshif "$BAT" interface | grep -q "^$IF: active"; then
+      echo attached
+    else
+      echo "failed to attach $IF to $BAT" >&2
+      exit 1
+    fi
+  args:
+    executable: /bin/sh
+  loop: "{{ served_regions }}"
+  loop_control:
+    loop_var: r
+  register: mesh_attach
+  changed_when: "'attached' in mesh_attach.stdout"
+
+# RA hardening for the mesh/bat/tap devices. ifup skips the post-up hooks once
+# an interface is already configured, so the per-interface pinning in the
+# interfaces file only takes effect on a fresh bring-up. Re-apply it here so
+# the running host matches the desired state.
+- name: Disable accept_ra/autoconf on the mesh, bat and tap interfaces
+  ansible.builtin.shell:
+    cmd: |
+      set -u
+      for i in $(ip -o link show | awk -F': ' '{print $2}' | sed 's/@.*//'); do
+        case "$i" in
+          lo|intra-as|uplink) continue ;;
+        esac
+        /sbin/sysctl -q -w net.ipv6.conf.$i.accept_ra=0
+        /sbin/sysctl -q -w net.ipv6.conf.$i.autoconf=0
+      done
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+
+- name: Read the batman originators for the primary region
+  ansible.builtin.command: "{{ batctl_path }} meshif bat-hhsued originators"
+  register: originators
+  changed_when: false
+  failed_when: false
+
+- name: Report mesh state
+  ansible.builtin.debug:
+    var: originators.stdout_lines

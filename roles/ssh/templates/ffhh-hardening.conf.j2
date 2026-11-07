@@ -1,0 +1,24 @@
+# SSH hardening for {{ ffhh_host_name }} (managed by roles/ssh).
+#
+# Authentication: public key only. Password and keyboard-interactive paths
+# are off for every account including root (root additionally requires a
+# key). Brute-force noise is handled by fail2ban in front of this.
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+PermitEmptyPasswords no
+HostbasedAuthentication no
+AuthenticationMethods publickey
+PermitRootLogin prohibit-password
+MaxAuthTries 4
+LoginGraceTime 30
+UseDNS no
+X11Forwarding no
+AllowTcpForwarding yes
+
+# Algorithm policy: no CBC/3DES/RC4, no non-ETM MACs, no SHA-1 or diffie-
+# hellman-group1/14 KEX. Debian 13's OpenSSH would negotiate these anyway;
+# stating them pins the policy against future default changes.
+Ciphers {{ ssh_ciphers }}
+MACs {{ ssh_macs }}
+KexAlgorithms {{ ssh_kex }}

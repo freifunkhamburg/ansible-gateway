@@ -1,0 +1,27 @@
+#!/bin/bash
+# Kea 3 control-socket statistics, same interface as the helper interface:
+#   kea-dhcp4-query <subnet-id> [total]
+# Kea 3 keeps the same statistic names, but the socket is /run/kea.
+set -u
+SOCKET={{ kea_socket }}
+
+id_assigned="subnet[$1].assigned-addresses"
+id_total="subnet[$1].total-addresses"
+
+# Kea 3 returns a LIST of historical samples per statistic (newest first),
+# unlike the Kea 1.x gateways where a statistic was a single value. Taking
+# every sample makes the helper print one number per line, so `check.sh` fed a
+# multi-line value to bc and broke. Take the newest sample only.
+value_of () {
+    local id="$1"
+    local query="{ \"command\": \"statistic-get\", \"arguments\": { \"name\": \"$id\" } }"
+    local result
+    result=$(echo "$query" | socat UNIX:"$SOCKET" -)
+    echo "$result" | jq -r --arg id "$id" '.arguments[$id] // [] | .[0][0] // 0'
+}
+
+if [[ ${2:-} == "total" ]]; then
+    value_of "$id_total"
+else
+    value_of "$id_assigned"
+fi

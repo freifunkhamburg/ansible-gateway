@@ -1,0 +1,47 @@
+---
+# Client-view service check.
+#
+# Installs tools/mesh-client-check.py and runs it on the gateway the way a
+# client attached to the mesh would probe the services:
+#   v4 uplink + SNAT range, v6 uplink, DNS (v4/v6), NTP (v4/v6),
+#   Router Advertisements, DHCPv6 information-request.
+#
+#   ansible-playbook playbooks/gateway-client-check.yml
+#   ansible-playbook playbooks/gateway-client-check.yml \
+#       -e mc_v4_target=1.1.1.1 -e mc_dns_name=freifunk.net
+#
+# The play fails if any check fails; the full PASS/FAIL table is printed.
+- name: Check client-facing services
+  hosts: gw05
+  become: true
+  gather_facts: false
+  vars:
+    mc_script: /usr/local/bin/mesh-client-check
+  tasks:
+    - name: Install the mesh client check tool
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../tools/mesh-client-check.py"
+        dest: "{{ mc_script }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Run the client-view checks
+      ansible.builtin.command:
+        argv:
+          - "{{ mc_script }}"
+          - "--snat-range"
+          - "{{ gw_public_snat_range }}"
+          - "--v4-target"
+          - "{{ mc_v4_target | default('1.1.1.1') }}"
+          - "--v6-target"
+          - "{{ mc_v6_target | default('2606:4700:4700::1111') }}"
+          - "--dns-name"
+          - "{{ mc_dns_name | default('freifunk.net') }}"
+      register: mc
+      changed_when: false
+      failed_when: mc.rc != 0
+
+    - name: Show the results
+      ansible.builtin.debug:
+        msg: "{{ mc.stdout_lines }}"

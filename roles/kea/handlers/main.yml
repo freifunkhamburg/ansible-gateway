@@ -1,0 +1,10 @@
+---
+- name: restart kea dhcp4
+  ansible.builtin.systemd_service:
+    name: "{{ kea_dhcp4_unit | default('kea-dhcp4-server.service') }}"
+    state: restarted
+
+- name: restart kea dhcp6
+  ansible.builtin.systemd_service:
+    name: "{{ kea_dhcp6_unit | default('kea-dhcp6-server.service') }}"
+    state: restarted

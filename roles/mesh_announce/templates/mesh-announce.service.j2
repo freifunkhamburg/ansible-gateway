@@ -1,0 +1,15 @@
+# respondd from the upstream mesh-announce checkout: one process for all
+# domains. Requests are mapped to a domain by the receiving bat-<region>
+# interface, and the multicast group is joined on every registered device.
+[Unit]
+Description=mesh-announce respondd (Freifunk domains {{ mesh_announce_domains | map(attribute='domain') | join(', ') }})
+After=network.target
+
+[Service]
+ExecStart={{ mesh_announce_dir }}/respondd.py -f {{ mesh_announce_conf_dir }}/respondd.conf -d {{ mesh_announce_dir }}/providers
+WorkingDirectory={{ mesh_announce_dir }}
+Restart=always
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+[Install]
+WantedBy=multi-user.target

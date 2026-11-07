@@ -1,0 +1,176 @@
+---
+# Kea DHCP (v4 + v6) for the Debian 13 base.
+#
+# Config layout: memfile leases, per-region subnets with this gateway as
+# router/DNS, and an informational-only DHCPv6 server. Static IP-reservation
+# includes come from the dhcp-static repository.
+
+- name: Ensure apt key directory exists
+  ansible.builtin.file:
+    path: "{{ kea_isc_keyring | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: kea_use_isc_repo | bool
+
+- name: Fetch the ISC repository signing key
+  ansible.builtin.get_url:
+    url: "{{ kea_isc_repo_base }}/gpg.{{ kea_isc_key_id }}.key"
+    dest: "{{ kea_isc_keyring }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: kea_use_isc_repo | bool
+  # needed for `apt update` key verification even under --check
+  check_mode: false
+
+- name: Configure the ISC Kea apt repository
+  ansible.builtin.copy:
+    content: |
+      # ISC Kea LTS series ({{ kea_isc_repo_base | regex_replace('.*/kea-', 'kea-') }}).
+      # Managed by roles/kea.
+      deb [signed-by={{ kea_isc_keyring }}] {{ kea_isc_repo_base }}/deb/debian {{ ansible_distribution_release }} main
+    dest: /etc/apt/sources.list.d/isc-kea.list
+    owner: root
+    group: root
+    mode: "0644"
+  register: kea_repo_file
+  when: kea_use_isc_repo | bool
+  # written for real (also under --check): the repository must exist for the
+  # cache refresh and package resolution below to be meaningful
+  check_mode: false
+
+- name: Remove the ISC Kea apt repository when disabled
+  ansible.builtin.file:
+    path: /etc/apt/sources.list.d/isc-kea.list
+    state: absent
+  when: not (kea_use_isc_repo | bool)
+
+- name: Refresh the apt cache when the repository changed
+  ansible.builtin.apt:
+    update_cache: true
+  when: kea_repo_file is changed
+  # metadata only — run it for real even in --check so package lookups
+  # against the new repository resolve
+  check_mode: false
+
+- name: Install Kea packages
+  ansible.builtin.apt:
+    name: "{{ kea_packages_isc if (kea_use_isc_repo | bool) else kea_packages_debian }}"
+    state: present
+
+- name: Learn the Kea binary, version and unit names
+  ansible.builtin.shell: |
+    b4=$(command -v kea-dhcp4 || echo /usr/sbin/kea-dhcp4)
+    b6=$(command -v kea-dhcp6 || echo /usr/sbin/kea-dhcp6)
+    printf 'dhcp4_bin=%s\n' "$b4"
+    printf 'dhcp6_bin=%s\n' "$b6"
+    printf 'dhcp4_unit=%s\n' "$(systemctl list-unit-files --no-legend --no-pager 'kea-dhcp4*' 'isc-kea-dhcp4*' | awk '{print $1; exit}')"
+    printf 'dhcp6_unit=%s\n' "$(systemctl list-unit-files --no-legend --no-pager 'kea-dhcp6*' 'isc-kea-dhcp6*' | awk '{print $1; exit}')"
+    printf 'version=%s\n' "$("$b4" -V 2>/dev/null | head -1 || true)"
+  register: kea_names
+  changed_when: false
+  # read-only discovery; must also run in --check so later templates can
+  # reference the binary paths (a not-yet-installed kea just reports nothing)
+  check_mode: false
+
+- name: Set Kea runtime facts
+  ansible.builtin.set_fact:
+    kea_dhcp4_bin: "{{ kea_names.stdout | regex_findall('(?m)^dhcp4_bin=(.*)$') | first }}"
+    kea_dhcp6_bin: "{{ kea_names.stdout | regex_findall('(?m)^dhcp6_bin=(.*)$') | first }}"
+    kea_dhcp4_unit: "{{ kea_names.stdout | regex_findall('(?m)^dhcp4_unit=((?:isc-)?kea-\\S+\\.service)$') | first | default('kea-dhcp4-server.service', true) }}"
+    kea_dhcp6_unit: "{{ kea_names.stdout | regex_findall('(?m)^dhcp6_unit=((?:isc-)?kea-\\S+\\.service)$') | first | default('kea-dhcp6-server.service', true) }}"
+    kea_version_line: "{{ kea_names.stdout | regex_findall('(?m)^version=(.*)$') | first | default('', true) }}"
+
+- name: Report the Kea version in use
+  ansible.builtin.debug:
+    msg: "kea-dhcp4: {{ kea_version_line if kea_version_line else '(not installed yet — check mode)' }}"
+
+- name: Assert the Kea LTS series is installed when the ISC repo is used
+  ansible.builtin.assert:
+    that:
+      - kea_version_line | regex_search('([0-9]+)\.[0-9]+') is not none
+      - (kea_version_line | regex_search('([0-9]+)\.[0-9]+', '\\1') | first) | int >= 3
+    fail_msg: >-
+      kea-dhcp4 reports "{{ kea_version_line }}" — the ISC LTS series (3.x)
+      was expected from the ISC repository.
+    quiet: true
+  when:
+    - kea_use_isc_repo | bool
+    - kea_version_line | length > 0
+
+- name: Ensure the static-reservation directory exists (repository is provisioned externally)
+  ansible.builtin.file:
+    path: "{{ kea_static_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render kea-dhcp4.conf
+  ansible.builtin.template:
+    src: kea-dhcp4.conf.j2
+    dest: "{{ kea_dhcp4_conf }}"
+    owner: root
+    group: root
+    mode: "0644"
+    validate: "{{ kea_dhcp4_bin }} -t %s"
+  notify: restart kea dhcp4
+
+- name: Render kea-dhcp6.conf
+  ansible.builtin.template:
+    src: kea-dhcp6.conf.j2
+    dest: "{{ kea_dhcp6_conf }}"
+    owner: root
+    group: root
+    mode: "0644"
+    validate: "{{ kea_dhcp6_bin }} -t %s"
+  notify: restart kea dhcp6
+
+# --- IP-reservation repository plumbing (prepared, disabled) ------------
+# update-dhcp-static pulls the reservation repo and reloads Kea. It is only
+# installed when kea_static_reservations_enabled; until then the reservations
+# cannot be verified to load on this gateway (repo access is set up outside
+# gw05), so nothing cron-wise exists for it either.
+- name: Install update-dhcp-static
+  ansible.builtin.template:
+    src: update-dhcp-static.j2
+    dest: /usr/local/bin/update-dhcp-static
+    owner: root
+    group: root
+    mode: "0755"
+  when: kea_static_reservations_enabled | bool
+
+- name: Remove update-dhcp-static when reservations are disabled
+  ansible.builtin.file:
+    path: /usr/local/bin/update-dhcp-static
+    state: absent
+  when: not (kea_static_reservations_enabled | bool)
+
+- name: Install the reservation pull cron job
+  ansible.builtin.copy:
+    content: |
+      # m h dom mon dow user  command
+      0,30 * * * * root /usr/local/bin/update-dhcp-static pull
+    dest: /etc/cron.d/dhcp
+    owner: root
+    group: root
+    mode: "0644"
+  when: kea_static_reservations_enabled | bool
+
+- name: Remove the reservation pull cron job when disabled
+  ansible.builtin.file:
+    path: /etc/cron.d/dhcp
+    state: absent
+  when: not (kea_static_reservations_enabled | bool)
+
+- name: Enable and start Kea
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop:
+    - "{{ kea_dhcp4_unit }}"
+    - "{{ kea_dhcp6_unit }}"
+  when: kea_enable | bool

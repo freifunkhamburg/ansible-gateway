@@ -1,0 +1,31 @@
+---
+# Kea source of truth for the Debian 13 base.
+#
+# Debian 13 ships Kea 2.6.3, which is a regular (non-LTS) ISC release and
+# already past its end of life. The ISC `kea-3-0` Cloudsmith repository
+# carries the Current Stable LTS series (3.0.x, EOL 2028-06) built for
+# Debian 13, the target release; that is what the gateways should run. `kea_use_isc_repo: false`
+# falls back to the (outdated) Debian packages.
+kea_use_isc_repo: true
+kea_isc_repo_base: "https://dl.cloudsmith.io/public/isc/kea-3-0"
+kea_isc_key_id: "B16C44CD45514C3C"
+kea_isc_keyring: /etc/apt/keyrings/isc-kea-3-0.asc
+
+kea_packages_isc:
+  - isc-kea-dhcp4-server
+  - isc-kea-dhcp6-server
+kea_packages_debian:
+  - kea-dhcp4-server
+  - kea-dhcp6-server
+
+# Start and enable the servers after rendering. Kea with an empty subnet list
+# is valid, so this is safe before the pools are confirmed.
+kea_enable: true
+
+# IP-reservation repository (freifunkhamburg/dhcp-static): prepared but OFF.
+# The deployment keys / repo access for gw05 are set up outside the gateway
+# (operator decision 2026-11). While false, kea renders no static includes,
+# update-dhcp-static is not installed and no cron entry exists. Flip to true
+# once the checkout under kea_static_dir is provisioned.
+kea_static_reservations_enabled: true
+kea_static_repo: "https://github.com/freifunkhamburg/dhcp-static.git"

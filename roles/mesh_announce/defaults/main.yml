@@ -1,0 +1,19 @@
+---
+# respondd from upstream mesh-announce (provider/config-file API).
+#
+# ALL domains run in ONE process; upstream maps each request to a domain by
+# the receiving interface. The checkout is pinned to a commit so deployments
+# are reproducible.
+
+mesh_announce_dir: /opt/mesh-announce
+mesh_announce_repo: "https://github.com/ffnord/ffnord-alfred-announce.git"
+mesh_announce_commit: "40be9a18ee91fa058478bc04105cbd79fd70279e"
+
+mesh_announce_conf_dir: /etc/mesh-announce
+mesh_announce_unit: mesh-announce.service
+
+# Composed by roles/regions from gw_regions; each entry:
+#   region: ffhh region id
+#   domain: Gluon domain name
+#   bat_if: the gateway's batman interface for that region
+mesh_announce_domains: []

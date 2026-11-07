@@ -1,0 +1,29 @@
+#
+# ntpsec configuration (kept renderable, de-selected by default).
+#
+# Classic ntpd directives; `logfile` is not used, logs go to syslog and the
+# drift file lives under /var/lib/ntpsec.
+#
+driftfile /var/lib/ntpsec/ntp.drift
+statistics loopstats peerstats clockstats
+filegen loopstats file loopstats type day enable
+filegen peerstats file peerstats type day enable
+filegen clockstats file clockstats type day enable
+
+# local reference clock (unsynchronised fallback, stratum 10)
+server 127.127.1.0
+fudge  127.127.1.0 stratum 10
+
+{% for s in ntp_upstream_servers %}
+server -4 {{ s }}
+{% endfor %}
+
+restrict -4 default ignore
+restrict -6 default ignore
+restrict 127.0.0.1
+restrict -6 ::1
+disable monitor
+
+# Mesh-only service, rate limited; upstream peers are not served.
+restrict {{ mesh_v4_aggregate }} mask {{ mesh_v4_aggregate | netmask }} kod notrap nomodify nopeer noquery limited
+restrict {{ mesh_v6_aggregate }} kod notrap nomodify nopeer noquery limited

@@ -1,0 +1,28 @@
+---
+# Build and install batman-adv and batctl from the pinned upstream release.
+#
+# Debian 13 does not package a batman-adv module matching the mesh's wire
+# format; the module and the control tool are built from the Open-Mesh git
+# tags. Downloads happen on the target, so its own network is used.
+#
+# The release is one value for every gateway (`batman_release` in
+# group_vars/all); the role resolves the tag, builds it only if the tree is
+# absent, and asserts the loaded module and batctl against it.
+
+- name: Install batman build prerequisites
+  ansible.builtin.package:
+    name:
+      - git
+      - build-essential
+      - pkg-config
+      - libnl-3-dev
+      - libnl-genl-3-dev
+      - "linux-headers-{{ ansible_kernel }}"
+      - ethtool
+    state: present
+
+- name: Build batctl
+  ansible.builtin.include_tasks: batctl.yml
+
+- name: Build batman-adv kernel module
+  ansible.builtin.include_tasks: batman_adv.yml

@@ -1,0 +1,97 @@
+# gw05 — a managed Debian 13 gateway.
+#
+# This is the reference host for the automation: every value needed to build
+# a gateway from scratch is here. Hardware-specific identity (NIC MACs, the
+# kernel, the root device) is per host; mesh addressing, pools, firewall
+# allowlists and operator keys are gateway identity.
+
+gw_index: 5
+ffhh_host_name: gw05
+
+# --- regions this gateway serves ---------------------------------------
+# The ordinal is 5 and it serves all four regions. Addresses inside each
+# region are derived from gw_index by roles/regions.
+gw_primary_region: hhsued
+gw_regions:
+  - hhsued
+  - hhwest
+  - hhnowe
+  - hhost
+
+# --- interface identity -----------------------------------------------
+# The VM ships ens18/ens19. roles/network renames them by MAC to the role
+# names and writes a persistent udev rule; a reboot is the operator's step.
+gw_nic_names:
+  - { mac: "bc:24:11:a1:5c:70", name: "intra-as" }
+  - { mac: "bc:24:11:4c:8b:13", name: "uplink" }
+gw_nic_rename: true
+gw_nic_rename_reboot: false
+
+# --- addressing -------------------------------------------------------
+intra_as_v4: "193.96.224.213/29"
+intra_as_v4_gw: "193.96.224.210"
+intra_as_v6: "2a03:2267:ffff:d00::5000/64"
+intra_as_v6_gw: "2a03:2267:ffff:d00::2"
+
+uplink_v4: "100.64.112.226/29"
+uplink_v4_peer: "100.64.112.225"
+
+# The published block. The SNAT range is the only input: the /32s published
+# on dummy0 and the BIRD static routes are derived from it.
+gw_public_net: "193.96.224.0/24"
+gw_public_snat_range: "193.96.224.24-193.96.224.31"
+
+# --- DHCP pools (slot 1 of each region /19) ---------------------------
+# The pool starts at the second /24 of the slot; the first /24 is kept for
+# static reservations.
+gw_kea_pools:
+  hhsued: "10.112.65.0-10.112.71.254"
+  hhwest: "10.112.97.0-10.112.103.254"
+  hhnowe: "10.112.193.0-10.112.199.254"
+  hhost: "10.112.225.0-10.112.231.254"
+
+# --- resolver: local mesh DNS (roles/powerdns) --------------------------
+# Authoritative loopback DNS for this gateway: serves the ffhh and mesh
+# reverse zones transferred from the community (srv01) plus the
+# <region>.clients.hamburg.freifunk.net zones, synthesizing the community
+# hex naming where the zones have no record (client addresses answer
+# <4 hex>.<region>.ffhh / ipv6-<16 hex>.<region>.clients.hamburg...).
+# Without it, kresd's RFC 6303 empty zone 10.in-addr.arpa swallows
+# 112.10.in-addr.arpa and even gw05.ffhh is NXDOMAIN.
+# See docs/knot-resolver.md for the exposure caveat of synthesized client
+# PTRs; enabled on gw05 by decision.
+ffhh_dns_enabled: true
+
+# gw05 is authoritative for both mesh reverse families: the Lua backend
+# claims 112.10.in-addr.arpa and each served region's /64 reverse zone, and
+# kresd queries it as an authoritative server ({auth = true}) rather than
+# forwarding those zones to the community DNS.
+ffhh_dns_authoritative_v4: true
+ffhh_dns_authoritative_v6: true
+
+# Additional DHCPv6 resolver advertised beside this gateway's own primary
+# region address.
+kea_dhcp6_dns_peers:
+  - "2a03:2267:1::10"
+
+# --- firewall ---------------------------------------------------------
+gw_ssh_allowlist:
+  - "10.0.0.0/8"
+  - "45.157.241.41/32"
+  - "49.12.225.141/32"
+  - "80.252.100.112/29"
+  - "168.119.77.189/32"
+  - "185.161.130.64/28"
+  - "193.96.224.128/25"
+  - "212.12.38.182/32"
+  - "212.12.51.134/32"
+  - "213.128.138.160/29"
+
+# --- administrator SSH keys -------------------------------------------
+ffhh_ssh_authorized_keys:
+  leo:
+    - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEECX876fWplnU2czi11K2zQOgLBN6rm8ikfJh7VJkTy cptr-ffhh-gw-ansible"
+    - "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDFtVHDcpRTpKiNLRuhtIp/RQlJpfJoDlGpfWeBEj1mUo/7XhUWCVsRb/VidC3zoGt1fJ1yV0wKm+NhCq9qBlOyu1Xza9D77Eowij4Qv46vxnnh94XYG+KU5FoAQ+FWQftdF4YXLMPOi+idIC6KDkfJftky1WuiTvTHskjkZ+fPE/o26P2lIvHHv67xqFWJeoLgIEC7BQmDeGpSBN8gCGEhxFZ2vKHcOU8rfMPHwNbAQHW9PXhb9jNIkRck3CM8LwiUxm8Ya5BEwx5BJgoBSsPT6verLJ74uVNttDuPsz+mqey9nM01Wlt86d06WE5YjQb/AEpg+uKW9LZ63fwltgWn leo"
+
+# --- host-specific operational facts ----------------------------------
+gw_check_hdd_device: "/dev/sda1"

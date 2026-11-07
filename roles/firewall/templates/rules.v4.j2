@@ -1,0 +1,65 @@
+# Netfilter rules for {{ ffhh_host_name }} (Debian 13 base).
+#
+# Gateway identity (public block, SNAT range, transit net, SSH allowlist)
+# comes from host_vars; published service /32s come from the shared
+# mesh_forward_hosts list, and the transit network is derived from
+# uplink_v4. Port ranges, MSS clamps, kernel table numbers and the fwmark
+# value are policy and stay literal.
+
+*mangle
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+-A PREROUTING -i {{ uplink_if }} -j MARK --set-xmark 0x1/0xffffffff
+-A PREROUTING -i bat-* -j MARK --set-xmark 0x1/0xffffffff
+COMMIT
+
+*filter
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:f2b-sshd - [0:0]
+:ssh-filter - [0:0]
+-A INPUT -p tcp -m tcp --dport 22 -j ssh-filter
+-A INPUT -s 127.0.0.0/8 -i lo -j ACCEPT
+-A INPUT -s {{ mesh_v4_aggregate }} -p udp -m udp --dport 10000:10010 -j DROP
+-A INPUT -s {{ gw_public_net }} -p udp -m udp --dport 10000:10010 -j DROP
+-A INPUT -p udp -m udp --dport 10000:10010 -j ACCEPT
+-A INPUT -p udp -m udp --dport 123 -m recent --set --name NTPTRAFFIC --mask 255.255.255.255 --rsource
+-A INPUT -p udp -m udp --dport 123 -m recent --update --seconds 30 --hitcount 20 --name NTPTRAFFIC --mask 255.255.255.255 --rsource -j DROP
+-A INPUT -p udp -m udp --dport 123 -j ACCEPT
+-A INPUT -p udp -m udp --dport 5000:5010 -j DROP
+-A INPUT -p tcp -m tcp --dport 9000:9999 -j DROP
+{% for h in mesh_forward_hosts %}
+-A FORWARD -d {{ h.dest }} -i {{ uplink_if }} -j ACCEPT
+-A FORWARD -s {{ h.dest }} -o {{ uplink_if }} -j ACCEPT
+{% endfor %}
+-A FORWARD ! -s {{ mesh_v4_aggregate }} -o {{ uplink_if }} -j DROP
+-A FORWARD -o {{ uplink_if }} -p tcp -m tcp --tcp-flags SYN,RST SYN -m tcpmss ! --mss 0:1240 -j TCPMSS --set-mss 1240
+{% for n in gw_ssh_allowlist %}
+-A ssh-filter -s {{ n }} -j RETURN
+{% endfor %}
+-A ssh-filter -j REJECT --reject-with icmp-port-unreachable
+COMMIT
+
+*nat
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+-A POSTROUTING -s {{ gw_transit_net }} -o {{ uplink_if }} -j RETURN
+-A POSTROUTING -s {{ mesh_v4_aggregate }} -o {{ uplink_if }} -j SNAT --to-source {{ gw_public_snat_range }}
+COMMIT
+
+*raw
+:PREROUTING ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+-A PREROUTING -i {{ intra_as_if }} -p udp -m udp --dport 10000:10010 -j NOTRACK
+-A PREROUTING -i {{ intra_as_if }} -p udp -m udp --dport 4789 -j NOTRACK
+-A PREROUTING -i {{ uplink_if }} -p udp -m udp --dport 4789 -j NOTRACK
+-A OUTPUT -o {{ intra_as_if }} -p udp -m udp --sport 10000:10010 -j NOTRACK
+-A OUTPUT -o {{ intra_as_if }} -p udp -m udp --dport 4789 -j NOTRACK
+-A OUTPUT -o {{ uplink_if }} -p udp -m udp --dport 4789 -j NOTRACK
+COMMIT

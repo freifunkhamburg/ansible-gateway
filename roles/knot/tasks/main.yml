@@ -1,0 +1,22 @@
+---
+# Knot Resolver production instance: the client-facing DNS (port 53).
+#
+# This role is active only when `dns_backend == "knot"`. When unbound is the
+# selected backend it does nothing except keep kresd down: the rendered
+# config and unit stay on disk so switching back is a one-line change plus
+# one playbook run (the knot_build dependency is gated the same way).
+#
+# Requires roles/served_regions (it consumes the composed `served_regions`)
+# and roles/knot_build (role dependency) for the binary.
+
+- name: Stop and disable the knot resolver when unbound is the backend
+  ansible.builtin.systemd_service:
+    name: "{{ knot_unit }}"
+    state: stopped
+    enabled: false
+  when: dns_backend != "knot"
+  failed_when: false
+
+- name: Configure the Knot Resolver (knot backend selected)
+  ansible.builtin.include_tasks: configure.yml
+  when: dns_backend == "knot"

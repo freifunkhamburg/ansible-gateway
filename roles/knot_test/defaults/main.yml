@@ -1,0 +1,66 @@
+---
+# Knot Resolver test instance: a mirror of the unbound ffhh DNS setup.
+#
+# It listens on a separate port (5353) as a reference instance. The
+# client-facing resolver is Knot Resolver on port 53 (knot); the
+# comparison against unbound is only meaningful when
+# dns_backend == "unbound".
+#
+# Version policy: "most recent upstream release", built from source. Debian
+# Debian 13 only ships 5.7.5, so the role resolves the newest tag from the
+# upstream repository and builds it with meson (same pattern as
+# roles/fastd). Set knot_test_tag to pin a release instead.
+knot_test_port: 5353
+knot_test_conf: /etc/knot-resolver/kresd-test.conf
+knot_test_unit: kresd-test.service
+knot_test_workdir: /var/lib/knot-resolver-test
+knot_test_cache_mb: 50
+knot_test_user: knot-resolver
+
+# --- build ---
+knot_test_repo: "https://github.com/CZ-NIC/knot-resolver"
+knot_test_tag: ""             # empty = newest upstream release
+knot_test_build_dir: /var/lib/knot-resolver-test/src
+knot_test_prefix: /usr/local
+# Plain `lib`, not multiarch: /usr/local/lib is on ld.so.conf, and it keeps
+# the built libkres away from any distro multiarch copy.
+knot_test_libdir: lib
+knot_test_bin: /usr/local/sbin/kresd
+knot_test_build_opts:
+  - --buildtype=release
+  - --prefix={{ knot_test_prefix }}
+  - --libdir={{ knot_test_libdir }}
+  # Trust-anchor updates need a writable keyfile directory; the instance runs
+  # as an unprivileged user, so TA management is off (root.keys is installed
+  # read-only by meson).
+  - -Dmanaged_ta=disabled
+knot_test_build_deps:
+  - build-essential
+  - meson
+  - ninja-build
+  - pkg-config
+  - git
+  - python3
+  - luajit
+  - libluajit-5.1-dev
+  - libknot-dev
+  - libuv1-dev
+  - libgnutls28-dev
+  - liblmdb-dev
+  - libnghttp2-dev
+  - libcap-ng-dev
+  - libsystemd-dev
+# The distro package must not coexist: its libkres.so.9 would be picked up
+# instead of the built one.
+knot_test_distro_packages:
+  - knot-resolver
+  - knot-resolver-module-http
+
+# The upstream the ffhh zone and the 112.10 reverse zone forward to.
+knot_test_upstream_ffhh: "2a00:14b0:4200:3380:134::1"
+# Start at boot too; set false for a purely transient experiment.
+knot_test_enable: false
+# Run the comparison against unbound after the service starts. With knot as
+# the client-facing resolver there is no unbound on port 53 to compare with,
+# so the default follows the backend selection.
+knot_test_verify: "{{ dns_backend == 'unbound' }}"

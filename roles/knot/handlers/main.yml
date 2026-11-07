@@ -1,0 +1,14 @@
+---
+# Restart on config/unit change, clearing the tmpfs cache first: a negative
+# entry cached from a previous (possibly broken) configuration must not
+# survive the restart.
+- name: Restart knot resolver
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      systemctl daemon-reload
+      systemctl stop "{{ knot_unit }}" || true
+      rm -f "{{ knot_cache_dir }}/data.mdb"
+      systemctl start "{{ knot_unit }}"
+    executable: /bin/bash
+  when: not ansible_check_mode

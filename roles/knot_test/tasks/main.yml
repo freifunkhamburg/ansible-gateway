@@ -1,0 +1,246 @@
+---
+# Test-only role: a Knot Resolver mirror of the unbound ffhh DNS setup on a
+# non-53 port, built from upstream source at the newest release.
+# It is deliberately not wired into the client DNS path.
+#
+# Requires roles/served_regions (it consumes the composed `served_regions`).
+
+- name: Assert the gateway serves at least one region
+  ansible.builtin.assert:
+    that:
+      - served_regions is defined
+      - served_regions | length > 0
+    fail_msg: "served_regions is not set; run roles/served_regions first."
+
+# --- build dependencies ------------------------------------------------
+- name: Install the Knot Resolver build dependencies
+  ansible.builtin.apt:
+    name: "{{ knot_test_build_deps }}"
+    state: present
+    update_cache: false
+
+- name: Remove any distro Knot Resolver packages
+  ansible.builtin.apt:
+    name: "{{ knot_test_distro_packages }}"
+    state: absent
+
+# --- source ------------------------------------------------------------
+- name: Resolve the newest upstream release tag
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      git ls-remote --tags --refs "{{ knot_test_repo }}" \
+        | sed 's#.*refs/tags/##' \
+        | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+        | sort -V | tail -1
+    executable: /bin/bash
+  register: knot_test_latest_tag
+  changed_when: false
+  # read-only: run it in check mode too, so the tag assert has a value
+  check_mode: false
+  when: knot_test_tag == ""
+
+- name: Select the target release
+  ansible.builtin.set_fact:
+    knot_test_desired_tag: >-
+      {{ knot_test_tag if knot_test_tag else
+         (knot_test_latest_tag.stdout | default('') | trim) }}
+
+- name: Assert a release tag was resolved
+  ansible.builtin.assert:
+    that:
+      - knot_test_desired_tag is defined
+      - knot_test_desired_tag | length > 0
+    fail_msg: "could not resolve a Knot Resolver release tag (repo unreachable?)"
+
+- name: Read the currently installed release
+  ansible.builtin.command: "{{ knot_test_bin }} --version"
+  register: knot_test_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Check whether the source tree is present
+  ansible.builtin.stat:
+    path: "{{ knot_test_build_dir }}/.git"
+  register: knot_test_src_stat
+  check_mode: false
+
+# Rebuild only when the installed binary does not match the desired tag or the
+# source tree is missing; otherwise the build steps are skipped, which keeps
+# the playbook idempotent.
+- name: Decide whether a build is needed
+  ansible.builtin.set_fact:
+    knot_test_needs_build: >-
+      {{ knot_test_desired_tag.lstrip('v') not in (knot_test_installed.stdout | default(''))
+         or not knot_test_src_stat.stat.exists }}
+
+- name: Ensure the source directory exists
+  ansible.builtin.file:
+    path: "{{ knot_test_build_dir | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: knot_test_needs_build | bool
+
+- name: Clone or refresh the source at the desired tag
+  ansible.builtin.shell: |
+    set -e
+    if [ -d "{{ knot_test_build_dir }}/.git" ]; then
+      git -C "{{ knot_test_build_dir }}" fetch --tags --depth 1 origin
+    else
+      git clone --branch "{{ knot_test_desired_tag }}" --depth 1 \
+        "{{ knot_test_repo }}" "{{ knot_test_build_dir }}"
+    fi
+    git -C "{{ knot_test_build_dir }}" checkout -f "{{ knot_test_desired_tag }}"
+    # policy/modules need lua-aho-corasick; without it meson setup fails.
+    git -C "{{ knot_test_build_dir }}" submodule update --init --recursive
+  register: knot_test_src
+  changed_when: true
+  when:
+    - knot_test_needs_build | bool
+    - not ansible_check_mode
+
+- name: Configure the build
+  ansible.builtin.shell: |
+    set -e
+    if [ -d build ]; then
+      meson setup --reconfigure build {{ knot_test_build_opts | join(' ') }}
+    else
+      meson setup build {{ knot_test_build_opts | join(' ') }}
+    fi
+  args:
+    chdir: "{{ knot_test_build_dir }}"
+  changed_when: true
+  when:
+    - knot_test_needs_build | bool
+    - not ansible_check_mode
+
+- name: Compile
+  ansible.builtin.command: ninja -C build
+  args:
+    chdir: "{{ knot_test_build_dir }}"
+  changed_when: true
+  when:
+    - knot_test_needs_build | bool
+    - not ansible_check_mode
+
+- name: Install to the prefix
+  ansible.builtin.command: meson install -C build
+  args:
+    chdir: "{{ knot_test_build_dir }}"
+  changed_when: true
+  when:
+    - knot_test_needs_build | bool
+    - not ansible_check_mode
+
+- name: Refresh the linker cache for the built libkres
+  ansible.builtin.command: ldconfig
+  changed_when: false
+  when:
+    - knot_test_needs_build | bool
+    - not ansible_check_mode
+
+- name: Verify the installed release
+  ansible.builtin.command: "{{ knot_test_bin }} --version"
+  register: knot_test_version
+  changed_when: false
+  check_mode: false
+
+- name: Assert the built version matches the desired tag
+  ansible.builtin.assert:
+    that: "knot_test_desired_tag.lstrip('v') in knot_test_version.stdout"
+    fail_msg: >-
+      {{ knot_test_bin }} reports {{ knot_test_version.stdout }}; expected
+      {{ knot_test_desired_tag }}.
+
+# --- runtime ----------------------------------------------------------
+- name: Ensure dig is available for the comparison harness
+  ansible.builtin.shell:
+    cmd: command -v dig || true
+    executable: /bin/sh
+  register: knot_test_dig
+  changed_when: false
+  check_mode: false
+
+- name: Assert dig is available
+  ansible.builtin.assert:
+    that:
+      - knot_test_dig.stdout | length > 0
+    fail_msg: "dig is required for the comparison; install bind9-dnsutils."
+
+- name: Ensure the test work directory exists
+  ansible.builtin.file:
+    path: "{{ knot_test_workdir }}"
+    state: directory
+    owner: "{{ knot_test_user }}"
+    group: "{{ knot_test_user }}"
+    mode: "0750"
+
+- name: Ensure the kresd control-socket directory exists
+  ansible.builtin.file:
+    path: "{{ knot_test_workdir }}/control"
+    state: directory
+    owner: "{{ knot_test_user }}"
+    group: "{{ knot_test_user }}"
+    mode: "0750"
+
+- name: Render the kresd test config
+  ansible.builtin.template:
+    src: kresd-test.conf.j2
+    dest: "{{ knot_test_conf }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart kresd test instance
+
+- name: Render the region facts used by the comparison harness
+  ansible.builtin.template:
+    src: regions.json.j2
+    dest: "{{ knot_test_workdir }}/regions.json"
+    owner: "{{ knot_test_user }}"
+    group: "{{ knot_test_user }}"
+    mode: "0644"
+
+- name: Render the kresd test unit
+  ansible.builtin.template:
+    src: kresd-test.service.j2
+    dest: "/etc/systemd/system/{{ knot_test_unit }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart kresd test instance
+
+- name: Install the comparison harness
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../../tools/knot-test-compare.py"
+    dest: /usr/local/bin/knot-test-compare
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Enable and start the kresd test instance
+  ansible.builtin.systemd:
+    name: "{{ knot_test_unit }}"
+    state: started
+    enabled: "{{ knot_test_enable }}"
+    daemon_reload: true
+
+# The handler restarts the unit when the config/unit changed, so run it before
+# the comparison; otherwise the checks would hit the old process.
+- name: Flush kresd test handlers
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify the kresd instance matches unbound
+  ansible.builtin.command:
+    cmd: "/usr/local/bin/knot-test-compare --regions {{ knot_test_workdir }}/regions.json --unbound-port 53 --knot-port {{ knot_test_port }}"
+  register: knot_test_compare
+  changed_when: false
+  failed_when: knot_test_compare.rc != 0
+  when: knot_test_verify
+
+- name: Show the comparison result
+  ansible.builtin.debug:
+    var: knot_test_compare.stdout_lines
+  when: knot_test_verify

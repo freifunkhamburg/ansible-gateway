@@ -1,0 +1,147 @@
+{#
+  Knot Resolver test instance: mirror of the unbound ffhh DNS setup.
+
+  Mapping from unbound's nodeffhh.conf / ffhh.conf to kresd:
+
+    local-zone "<zone>" redirect + access-control-tag-data per subnet
+      -> one policy.suffix() rule per zone and per client subnet, answered
+         authoritatively (AA) with TTL 3600 from a forged rtable.
+         Unbound selects the longest matching local-zone, so the more specific
+         v4.N.ntp.services.ffhh zones must be registered before
+         N.ntp.services.ffhh (which is their parent).
+
+    clients without a matching tag fall through to forward-zone "ffhh"
+      -> the local rules only match their subnets, so untagged clients reach
+         the FORWARD rule, exactly like unbound.
+
+    domain-insecure: "ffhh"
+      -> policy.FLAGS({'DNSSEC_INSECURE'}) on the ffhh zone. Without it the
+         forwarded CNAME chain (node.ffhh -> knoten.ffhh) fails validation and
+         kresd answers SERVFAIL.
+
+    forward-zone "ffhh" / "112.10.in-addr.arpa"
+      -> policy.suffix(policy.FORWARD(<community DNS>), ...).
+
+  Not replicated (deliberate, test scope): unbound's access-control allow/
+  refuse list, chroot,
+  outgoing-interface pinning. The instance listens only on loopback and the
+  gateway's own region addresses on port {{ knot_test_port }}, and the
+  gateway firewall already restricts queries from outside the mesh.
+#}
+local ffi = require('ffi')
+
+net.listen('127.0.0.1', {{ knot_test_port }}, { kind = 'dns' })
+net.listen('::1', {{ knot_test_port }}, { kind = 'dns', freebind = true })
+{% for r in served_regions %}
+net.listen('{{ r.v4_host }}', {{ knot_test_port }}, { kind = 'dns' })
+{% endfor %}
+{% for r in served_regions %}
+net.listen('{{ r.v6_host }}', {{ knot_test_port }}, { kind = 'dns', freebind = true })
+{% endfor %}
+
+modules = { 'hints > iterate', 'stats', 'view' }
+-- Cache on tmpfs (/run/knot-resolver-test, created by RuntimeDirectory).
+-- Knot Resolver 6 always uses LMDB; tmpfs keeps it non-persistent.
+cache.storage = '/run/knot-resolver-test'
+cache.size = {{ knot_test_cache_mb }} * MB
+
+-- `modules = {...}` exposes the loaded module as the global `view`
+local viewmod = view
+
+local function rrset(atype, values)
+    local lines = {}
+    for _, v in ipairs(values) do
+        lines[#lines + 1] = atype .. ' ' .. v
+    end
+    return { ttl = 3600, rdata = kres.parse_rdata(lines) }
+end
+
+-- Answer from a per-type rtable. Missing qtype -> authoritative NODATA
+-- (NOERROR, empty answer, no SOA), matching unbound's local-zone behaviour.
+local function answer_for(tbl)
+    return function(state, req)
+        local qry = req:current()
+        local answer = req:ensure_answer()
+        if answer == nil then return nil end
+        ffi.C.kr_pkt_make_auth_header(answer)
+        answer:rcode(kres.rcode.NOERROR)
+        local set = tbl[qry.stype]
+        if set ~= nil then
+            answer:begin(kres.section.ANSWER)
+            if type(set.rdata) == 'table' then
+                for _, r in ipairs(set.rdata) do
+                    answer:put(qry.sname, set.ttl, answer:qclass(), qry.stype, r)
+                end
+            else
+                answer:put(qry.sname, set.ttl, answer:qclass(), qry.stype, set.rdata)
+            end
+        end
+        return kres.DONE
+    end
+end
+
+-- One entry per served region; addresses derived from the region tables.
+local regions = {
+{% for r in served_regions %}
+    {
+        subnets = { '{{ r.v4_net }}', '{{ r.v6_site }}' },
+        gw4 = '{{ r.v4_net | host_in(1) | addr_only }}',
+        gw6 = '{{ r.v6_prefix | host_in(1) | addr_only }}',
+        ntp6 = {
+            '{{ r.v6_prefix | host_in(16) | addr_only }}',
+            '{{ r.v6_prefix | host_in(32) | addr_only }}',
+            '{{ r.v6_prefix | host_in(48) | addr_only }}',
+        },
+        ntp4 = {
+            '{{ r.ntp_v4[0] }}',
+            '{{ r.ntp_v4[1] }}',
+            '{{ r.ntp_v4[2] }}',
+        },
+    },
+{% endfor %}
+}
+
+-- Only answer for clients inside the region; otherwise return nil so the
+-- query falls through to the forward rules (untagged clients behave like
+-- unbound: forwarded to the community DNS).
+local function src_action(subnet, action)
+    local match = viewmod.rule_src(action, subnet)
+    return function(state, req)
+        local a = match(req)
+        if a ~= nil then return a(state, req) end
+        return nil
+    end
+end
+
+-- domain-insecure "ffhh": never validate inside ffhh
+policy.add(policy.suffix(policy.FLAGS({'DNSSEC_INSECURE'}), {todname('ffhh')}))
+
+for _, r in ipairs(regions) do
+    -- Order matters: v4.N.ntp.services.ffhh is a subdomain of
+    -- N.ntp.services.ffhh, so the specific zone must match first.
+    local zones = {
+        { 'v4.1.ntp.services.ffhh', { [kres.type.A] = rrset('A', {r.ntp4[1]}) } },
+        { 'v4.2.ntp.services.ffhh', { [kres.type.A] = rrset('A', {r.ntp4[2]}) } },
+        { 'v4.3.ntp.services.ffhh', { [kres.type.A] = rrset('A', {r.ntp4[3]}) } },
+        { '1.ntp.services.ffhh',    { [kres.type.AAAA] = rrset('AAAA', {r.ntp6[1]}) } },
+        { '2.ntp.services.ffhh',    { [kres.type.AAAA] = rrset('AAAA', {r.ntp6[2]}) } },
+        { '3.ntp.services.ffhh',    { [kres.type.AAAA] = rrset('AAAA', {r.ntp6[3]}) } },
+        { 'node.ffhh',              { [kres.type.A] = rrset('A', {r.gw4}),
+                                      [kres.type.AAAA] = rrset('AAAA', {r.gw6}) } },
+        { 'knoten.ffhh',            { [kres.type.A] = rrset('A', {r.gw4}),
+                                      [kres.type.AAAA] = rrset('AAAA', {r.gw6}) } },
+        { 'router.ffhh',            { [kres.type.A] = rrset('A', {r.gw4}),
+                                      [kres.type.AAAA] = rrset('AAAA', {r.gw6}) } },
+    }
+    for _, z in ipairs(zones) do
+        local zone, tbl = z[1], z[2]
+        local action = answer_for(tbl)
+        for _, subnet in ipairs(r.subnets) do
+            policy.add(policy.suffix(src_action(subnet, action), {todname(zone)}))
+        end
+    end
+end
+
+-- forward-zone "ffhh" and "112.10.in-addr.arpa"
+policy.add(policy.suffix(policy.FORWARD('{{ knot_test_upstream_ffhh }}'), {todname('ffhh')}))
+policy.add(policy.suffix(policy.FORWARD('{{ knot_test_upstream_ffhh }}'), {todname('112.10.in-addr.arpa')}))

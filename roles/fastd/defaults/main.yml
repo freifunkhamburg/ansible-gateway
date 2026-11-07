@@ -1,0 +1,54 @@
+---
+# fastd: version policy, build, configuration and instance units.
+#
+# The role renders configuration and builds fastd from source;
+# Debian 13 packages fastd 23-2, but the role tracks the newest upstream
+# release instead of relying on the distro package.
+# It resolves the newest tag and builds it from source when the installed
+# binary is older. Build dependencies are the ones the meson setup needs
+# (libcap, json-c, crypto, mnl and bison are all required).
+
+# Upstream repository and the tag policy. An empty tag means "newest tag".
+fastd_repo: "https://github.com/NeoRaider/fastd"
+fastd_tag: ""          # set to e.g. "v23" to pin a release
+fastd_build_dir: /var/lib/fastd/src
+fastd_bin: /usr/bin/fastd   # same path as the reference fastd@.service
+fastd_build_deps:
+  - meson
+  - ninja-build
+  - pkg-config
+  - bison
+  - git
+  - libsodium-dev
+  - libuecc-dev
+  - libcap-dev
+  - libjson-c-dev
+  - libssl-dev
+  - libmnl-dev
+
+# Secrets come from the operator (ansible-vault), never from the repo.
+# Without them the instances are rendered but NOT started: fastd cannot run
+# without a secret, and inventing one would break the mesh handshake.
+#
+# Key scope:
+#   "instance" — one keypair per fastd instance (<region><NN>): 8 keys for
+#                gw05, so every region/port has its own public key.
+#   "suffix"   — one keypair per instance-number suffix, shared by the four
+#                regions (the shared two-slot layout: secret01/secret04).
+# Both are supported; gw05 uses per-instance keys.
+fastd_key_scope: "instance"
+
+# Expected shape with key_scope=instance:
+#   fastd_secrets = { "hhsued05": "<secret>", "hhsued08": "<secret>", ... }
+# with key_scope=suffix:
+#   fastd_secrets = { "05": "<secret>", "08": "<secret>" }
+fastd_start: false     # start instances once secrets are available
+
+# Peer identities published to the instance: each entry is rendered as
+# <peer_dir>/<name>.peer containing `key "<public key>";`. The repository
+# normally comes from git.hamburg.freifunk.net (operator key required); this
+# list is the local/self-managed equivalent.
+# gw05 carries one test peer for now.
+fastd_peers:
+  - name: thisisatestonly
+    key: "2dd233274eb5da968135c3faeadabf42678c32a52923bdcc2efc76f2a8da04ee"

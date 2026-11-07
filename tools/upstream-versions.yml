@@ -1,0 +1,74 @@
+# Catalog of components that are NOT plain Debian apt packages: things this
+# repo builds from source (batman-adv/batctl, fastd, Knot Resolver) or pins as
+# a git checkout (respondd/mesh-announce). Kea is delivered by apt from the
+# ISC repository rather than Debian; its entry is a *hint* check for the LTS
+# pin, not a rebuild decision.
+#
+# policy: latest (default) compares with the newest upstream tag; policy: lts
+# compares with the newest tag inside an LTS series (Kea 3.0.x). Knot Resolver
+# has no upstream LTS designation, so it stays on "latest".
+#
+# The checker runs ON THE TARGET (it needs the installed binaries and the
+# target's network). Entries are declarative so new components can be added
+# without touching the script.
+#
+# kind: tag    -> compare installed version against the newest upstream tag
+# kind: commit -> compare installed commit against upstream HEAD
+#
+# installed: how to read the version on the host. One of:
+#   command: <shell command>            + regex  (first match wins)
+#   file: <path>                        (whole file content is the version)
+#   git_dir: <checkout path>            (git rev-parse HEAD)
+
+components:
+  - name: batctl
+    kind: tag
+    repo: "https://git.open-mesh.org/batctl.git"
+    tag_regex: '^v[0-9]+\.[0-9]+$'
+    # One release for every gateway (group_vars/all: batman_release).
+    installed:
+      command: "/usr/local/sbin/batctl -v"
+      regex: 'batctl\s+([0-9]+\.[0-9]+)'
+
+  - name: batman-adv (kernel module)
+    kind: tag
+    repo: "https://git.open-mesh.org/batman-adv.git"
+    tag_regex: '^v[0-9]+\.[0-9]+$'
+    installed:
+      file: /sys/module/batman_adv/version
+
+  - name: fastd
+    kind: tag
+    repo: "https://github.com/NeoRaider/fastd"
+    tag_regex: '^v[0-9]+$'
+    installed:
+      command: "fastd --version"
+      regex: 'fastd\s+v?([0-9]+)'
+
+  - name: knot-resolver
+    kind: tag
+    repo: "https://github.com/CZ-NIC/knot-resolver"
+    tag_regex: '^v[0-9]+\.[0-9]+\.[0-9]+$'
+    installed:
+      command: "/usr/local/sbin/kresd --version"
+      regex: 'version\s+([0-9]+\.[0-9]+\.[0-9]+)'
+
+  - name: kea (package, LTS series)
+    kind: tag
+    policy: lts
+    # ISC publishes Kea as LTS + stable releases. The LTS line is 3.0.x
+    # (current stable LTS = 3.0.5 per isc.org/kea); comparing against the
+    # newest release (3.3.x) would show a deliberate LTS pin as outdated.
+    repo: "https://gitlab.isc.org/isc-projects/kea.git"
+    tag_regex: '^Kea-[0-9]+\.[0-9]+\.[0-9]+$'
+    lts_tag_regex: '^Kea-3\.0\.[0-9]+$'
+    installed:
+      command: "dpkg-query -W -f='${Version}' isc-kea-dhcp4"
+      regex: '^([0-9]+\.[0-9]+\.[0-9]+)'
+
+  - name: ffnord-alfred-announce (respondd)
+    kind: commit
+    repo: "https://github.com/ffnord/ffnord-alfred-announce.git"
+    installed:
+      git_dir: /opt/mesh-announce
+

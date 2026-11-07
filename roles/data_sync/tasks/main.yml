@@ -1,0 +1,48 @@
+---
+# Populate the external data repository (dhcp-static). The target machine
+# fetches it over its own network.
+
+- name: Ensure repository parent directories exist
+  ansible.builtin.file:
+    path: "{{ item.path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ data_repos }}"
+
+- name: Clone or update the repositories
+  ansible.builtin.git:
+    repo: "{{ item.remote }}"
+    dest: "{{ item.path }}"
+    version: "{{ item.version }}"
+    update: true
+    accept_hostkey: true
+  loop: "{{ data_repos }}"
+  register: git_sync
+
+- name: Fix repository ownership
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.owner }}"
+    recurse: true
+  loop: "{{ data_repos }}"
+
+# --- repository hooks ---------------------------------------------------
+# A `post-merge` hook inside the checkout runs the matching reload script, so
+# cron's `git pull` regenerates the derived configuration only when upstream
+# data changed.
+- name: Install the post-merge hooks
+  ansible.builtin.template:
+    src: post-merge.j2
+    dest: "{{ item.path }}/.git/hooks/post-merge"
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ data_hooks }}"
+
+- name: Report the synchronized repository
+  ansible.builtin.debug:
+    msg: "dhcp-static {{ git_sync.results[0].after | default('?') }}"

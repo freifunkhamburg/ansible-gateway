@@ -1,0 +1,3 @@
+{% for n in gw_nic_names %}
+SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="{{ n.mac }}", NAME="{{ n.name }}"
+{% endfor %}

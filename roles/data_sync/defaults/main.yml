@@ -1,0 +1,13 @@
+---
+# Data repositories cloned on the target.
+
+data_repos:
+  - path: /var/lib/dhcp-static
+    remote: "https://github.com/freifunkhamburg/dhcp-static.git"
+    version: HEAD
+    owner: root
+
+# post-merge hooks: regenerate the derived configuration after a pull.
+data_hooks:
+  - path: /var/lib/dhcp-static
+    script: /usr/local/bin/update-dhcp-static

@@ -1,0 +1,20 @@
+## Identity and privilege changes ---------------------------------------
+-w /etc/passwd  -p wa -k identity
+-w /etc/group   -p wa -k identity
+-w /etc/shadow  -p wa -k identity
+-w /etc/gshadow -p wa -k identity
+-w /etc/sudoers    -p wa -k privilege
+-w /etc/sudoers.d/ -p wa -k privilege
+-w /etc/ssh/sshd_config -p wa -k sshd_config
+-w /etc/pam.d/ -p wa -k pam
+
+## Kernel and module state ---------------------------------------------
+-w /etc/modules-load.d/ -p wa -k modules
+-w /etc/sysctl.d/        -p wa -k sysctl
+-w /etc/audit/rules.d/   -p wa -k audit_rules
+
+## Privileged command execution (kept to a small set to avoid log floods)
+-a always,exit -F arch=b64 -F path=/usr/bin/sudo -F perm=x -k sudo_exec
+-a always,exit -F arch=b32 -F path=/usr/bin/sudo -F perm=x -k sudo_exec
+-a always,exit -F arch=b64 -S setuid -S setgid -S setreuid -S setregid -k setuid
+-a always,exit -F arch=b32 -S setuid -S setgid -S setreuid -S setregid -k setuid

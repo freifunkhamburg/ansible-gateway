@@ -1,0 +1,38 @@
+# External-metric knobs for the OSPF export filters. The values are the ones
+# reference on gw01/gw03, so an untouched gateway advertises exactly what the
+# existing ones do.
+#
+# OSPF chooses between gateways advertising the SAME prefix (the public /24,
+# the forwarded /32s, the region /64s and site /48s) by:
+#   - E1 routes: external metric + internal path cost. Internal costs in this
+#     domain are tens, so a metric margin of ~2x always beats them.
+#   - E2 routes: external metric only; equal metrics tie-break on the internal
+#     cost to the advertising router.
+# Raising these on a gateway makes every other gateway preferred while it is
+# merely a fallback; its OWN prefixes (NAT /32s, intra-as /64) stay reachable
+# because nobody else advertises them.
+
+# E1 metric for the v4 natips routes (NAT block /32s, forwarded /32s, public
+# /24). Reference value: 1000.
+gw_ospf_metric_nat4: 1000
+
+# E1 metric for v6 routes in 2a03:2267::/32{32,64} (region /64s, intra-as
+# /64). Reference value: 600.
+gw_ospf_metric_ext6: 600
+
+# E2 metric for the site /48 aggregates (static_ffhh6). BIRD's default when a
+# filter accepts without touching the metric is 10000, which is what the
+# reference gateways advertise.
+gw_ospf_metric_e2: 10000
+
+# OSPF interface costs on the region interfaces. The mesh networks (v4 region
+# /19s, v6 region /64s) are advertised as INTRA-AREA stubnets at the interface
+# cost, and OSPF prefers intra-area over any external route regardless of the
+# metrics above — so making a gateway less preferred for the regions means
+# raising these too, not just the externals. The uplink interface cost is NOT
+# a knob: it is the same on every gateway and raising it would only skew
+# paths through this router's transit link.
+gw_ospf_cost_v4_stub: 10   # reference value on the stub region interfaces
+gw_ospf_cost_v4_nbma: 50   # reference cost 50 on the v4 NBMA interface
+gw_ospf_cost_v6_stub: 10   # reference value on the stub region interfaces
+gw_ospf_cost_v6_nbma: 10   # reference v6 NBMA interface renders no cost (=10)

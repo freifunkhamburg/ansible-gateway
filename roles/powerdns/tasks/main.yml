@@ -1,0 +1,339 @@
+---
+# Authoritative reverse + clients DNS for the mesh (PowerDNS, Lua backend).
+#
+# Runs on a dedicated loopback address only; Knot Resolver forwards the
+# mesh reverse zones and the <region>.clients.hamburg.freifunk.net zones
+# here, so clients never talk to this server and no firewall port is
+# needed.  The Lua script (ffhh-synth.lua) synthesizes the community hex
+# naming in both directions and keeps the static snapshot records above it.
+
+- name: Remove Knot DNS (replaced by PowerDNS)
+  block:
+    - name: Stop and disable Knot DNS
+      ansible.builtin.systemd_service:
+        name: knot.service
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Purge the Knot DNS package
+      ansible.builtin.apt:
+        name: knot
+        state: absent
+        purge: true
+      # No autoremove: the autoremove candidates on gw05 include packages
+      # unrelated to Knot (python3-ntp); purge only Knot itself.
+
+    - name: Remove Knot DNS data directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/knot
+        - /var/lib/knot
+        - /run/knot
+
+- name: Stop and disable PowerDNS when local mesh DNS is off
+  ansible.builtin.systemd_service:
+    name: "{{ ffhh_dns_unit }}"
+    state: stopped
+    enabled: false
+  when: not (ffhh_dns_enabled | bool)
+  failed_when: false
+
+- name: Install PowerDNS authoritative with the Lua backend
+  ansible.builtin.apt:
+    name:
+      - pdns-server
+      - pdns-backend-lua2
+    state: present
+  when: ffhh_dns_enabled | bool
+
+- name: Remove the packaged bind backend config
+  ansible.builtin.file:
+    path: /etc/powerdns/pdns.d
+    state: absent
+  when: ffhh_dns_enabled | bool
+
+- name: Ensure the PowerDNS socket directory exists
+  ansible.builtin.file:
+    path: /run/pdns
+    state: directory
+    owner: pdns
+    group: pdns
+    mode: "0755"
+  when: (ffhh_dns_enabled | bool) and not ansible_check_mode
+
+- name: Ensure the PowerDNS state directory exists
+  ansible.builtin.file:
+    path: "{{ ffhh_dns_data | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: ffhh_dns_enabled | bool
+
+- name: Install the community zone transfer script
+  ansible.builtin.template:
+    src: ffhh-dns-fetch.py.j2
+    dest: "{{ ffhh_dns_fetch_bin }}"
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Refresh community zone data
+  when: ffhh_dns_enabled | bool
+
+- name: Install the zone transfer service and timer
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "/etc/systemd/system/{{ item.dest }}"
+    mode: "0644"
+  loop:
+    - { src: ffhh-dns-fetch.service.j2, dest: ffhh-dns-fetch.service }
+    - { src: ffhh-dns-fetch.timer.j2, dest: ffhh-dns-fetch.timer }
+  when: ffhh_dns_enabled | bool
+
+- name: Enable and start the zone transfer timer
+  ansible.builtin.systemd_service:
+    name: ffhh-dns-fetch.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: (ffhh_dns_enabled | bool) and not ansible_check_mode
+
+- name: Check for existing community zone data
+  ansible.builtin.stat:
+    path: "{{ ffhh_dns_data }}"
+  register: ffhh_dns_data_stat
+  when: (ffhh_dns_enabled | bool) and not ansible_check_mode
+
+- name: Transfer the community zones before the first PowerDNS start
+  ansible.builtin.command: "{{ ffhh_dns_fetch_bin }}"
+  changed_when: true
+  # Failure is not fatal: pdns keeps serving the previous data file (or
+  # synthesized-only zones when there is none); the timer retries.
+  failed_when: false
+  when:
+    - ffhh_dns_enabled | bool
+    - not ansible_check_mode
+    - not (ffhh_dns_data_stat.stat.exists | default(false))
+
+- name: Render the synthesized zones Lua script
+  ansible.builtin.template:
+    src: ffhh-synth.lua.j2
+    dest: "{{ ffhh_dns_lua }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Restart powerdns
+    - Flush resolver negative cache
+  when: ffhh_dns_enabled | bool
+
+- name: Render the PowerDNS configuration
+  ansible.builtin.template:
+    src: pdns.conf.j2
+    dest: "{{ ffhh_dns_conf }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart powerdns
+  when: ffhh_dns_enabled | bool
+
+- name: Enable and start PowerDNS
+  ansible.builtin.systemd_service:
+    name: "{{ ffhh_dns_unit }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+  when: (ffhh_dns_enabled | bool) and not ansible_check_mode
+
+- name: Flush powerdns handlers
+  ansible.builtin.meta: flush_handlers
+  when: ffhh_dns_enabled | bool
+
+# --- verification ------------------------------------------------------
+
+- name: Check that community zone data is served
+  ansible.builtin.command:
+    cmd: >-
+      dig +short +time=3 +tries=1 A srv01.ffhh
+      @{{ ffhh_dns_listen }} -p {{ ffhh_dns_port }}
+  register: ffhh_dns_transferred
+  changed_when: false
+  retries: 3
+  delay: 3
+  until: ffhh_dns_transferred.stdout | trim == '212.12.51.134'
+  when: (ffhh_dns_enabled | bool) and not ansible_check_mode
+
+- name: Check the static IPv4 gateway PTR
+  ansible.builtin.command:
+    cmd: >-
+      dig +short +time=3 +tries=1 -x 10.112.1.5
+      @{{ ffhh_dns_listen }} -p {{ ffhh_dns_port }}
+  register: ffhh_dns_v4_static
+  changed_when: false
+  retries: 3
+  delay: 3
+  until: ffhh_dns_v4_static.stdout | trim == 'gw05.ffhh.'
+  when:
+    - ffhh_dns_enabled | bool
+    - ffhh_dns_authoritative_v4 | bool
+    - not ansible_check_mode
+
+- name: Check a synthesized IPv4 PTR
+  ansible.builtin.command:
+    cmd: >-
+      dig +short +time=3 +tries=1 -x {{ ffhh_dns_test_v4 }}
+      @{{ ffhh_dns_listen }} -p {{ ffhh_dns_port }}
+  register: ffhh_dns_v4_synth
+  changed_when: false
+  retries: 3
+  delay: 3
+  until: ffhh_dns_v4_synth.stdout | trim == ffhh_dns_test_v4_ptr | trim
+  when:
+    - ffhh_dns_enabled | bool
+    - ffhh_dns_authoritative_v4 | bool
+    - not ansible_check_mode
+
+- name: Check the static IPv6 gateway PTR
+  ansible.builtin.command:
+    cmd: >-
+      dig +short +time=3 +tries=1
+      -x {{ (served_regions | first).v6_prefix | host_in(16) | addr_only }}
+      @{{ ffhh_dns_listen }} -p {{ ffhh_dns_port }}
+  register: ffhh_dns_v6_static
+  changed_when: false
+  retries: 3
+  delay: 3
+  until: >-
+    ffhh_dns_v6_static.stdout | trim ==
+    'gw01-new.' ~ (served_regions | first).id | regex_replace('^hh', '') ~ '.hamburg.freifunk.net.'
+  when:
+    - ffhh_dns_enabled | bool
+    - ffhh_dns_authoritative_v6 | bool
+    - not ansible_check_mode
+
+- name: Check a synthesized IPv6 PTR
+  ansible.builtin.command:
+    cmd: >-
+      dig +short +time=3 +tries=1 -x {{ ffhh_dns_test_v6 }}
+      @{{ ffhh_dns_listen }} -p {{ ffhh_dns_port }}
+  register: ffhh_dns_v6_synth
+  changed_when: false
+  retries: 3
+  delay: 3
+  until: ffhh_dns_v6_synth.stdout | trim == ffhh_dns_test_v6_ptr | trim
+  when:
+    - ffhh_dns_enabled | bool
+    - ffhh_dns_authoritative_v6 | bool
+    - not ansible_check_mode
+
+- name: Assert the IPv4 reverse answers
+  ansible.builtin.assert:
+    that:
+      - ffhh_dns_v4_static.stdout | trim == 'gw05.ffhh.'
+      - ffhh_dns_v4_synth.stdout | trim == ffhh_dns_test_v4_ptr | trim
+    fail_msg: >-
+      '{{ ffhh_dns_v4_static.stdout | trim }}' /
+      '{{ ffhh_dns_v4_synth.stdout | trim }}'
+      (expected gw05.ffhh. / {{ ffhh_dns_test_v4_ptr | trim }});
+      check {{ ffhh_dns_conf }} and {{ ffhh_dns_lua }}.
+  when:
+    - ffhh_dns_enabled | bool
+    - ffhh_dns_authoritative_v4 | bool
+    - not ansible_check_mode
+
+- name: Assert the IPv6 reverse answers
+  ansible.builtin.assert:
+    that:
+      - >-
+        ffhh_dns_v6_static.stdout | trim ==
+        'gw01-new.' ~ (served_regions | first).id | regex_replace('^hh', '') ~ '.hamburg.freifunk.net.'
+      - ffhh_dns_v6_synth.stdout | trim == ffhh_dns_test_v6_ptr | trim
+    fail_msg: >-
+      '{{ ffhh_dns_v6_static.stdout | trim }}' /
+      '{{ ffhh_dns_v6_synth.stdout | trim }}'
+      (expected gw01-new... / {{ ffhh_dns_test_v6_ptr | trim }});
+      check {{ ffhh_dns_conf }} and {{ ffhh_dns_lua }}.
+  when:
+    - ffhh_dns_enabled | bool
+    - ffhh_dns_authoritative_v6 | bool
+    - not ansible_check_mode
+
+- name: Check the reverse zones are claimed (AA) or refused, matching the flags
+  ansible.builtin.command:
+    cmd: >-
+      dig +noall +comments +time=3 +tries=1
+      -x {{ item.addr }}
+      @{{ ffhh_dns_listen }} -p {{ ffhh_dns_port }}
+  register: ffhh_dns_aa
+  changed_when: false
+  loop:
+    - addr: "{{ ffhh_dns_test_v4 }}"
+      family: v4
+      enabled: "{{ ffhh_dns_authoritative_v4 | bool }}"
+    - addr: "{{ ffhh_dns_test_v6 }}"
+      family: v6
+      enabled: "{{ ffhh_dns_authoritative_v6 | bool }}"
+  when:
+    - ffhh_dns_enabled | bool
+    - not ansible_check_mode
+  retries: 3
+  delay: 3
+  # Enabled: the zone must be claimed, so the reply is authoritative (aa).
+  # Disabled: the zone must not be claimed, so the reply is REFUSED.
+  # (+noall +comments, not +header: that flag form times out in this BIND build.)
+  until: >-
+    (' aa ' in ffhh_dns_aa.stdout) if (item.enabled | bool)
+    else ('REFUSED' in ffhh_dns_aa.stdout)
+
+- name: Show the authority checks
+  ansible.builtin.debug:
+    msg: >-
+      {{ res.item.family }}: {{ 'authoritative (aa)' if ' aa ' in res.stdout
+                                else ('refused (not claimed)' if 'REFUSED' in res.stdout
+                                else 'unexpected reply') }}
+  loop: "{{ ffhh_dns_aa.results | default([]) }}"
+  loop_control:
+    loop_var: res
+  when: (ffhh_dns_enabled | bool) and not ansible_check_mode
+
+- name: Check that the synthesized names resolve back
+  ansible.builtin.command:
+    cmd: >-
+      dig +short +time=3 +tries=1 {{ 'AAAA' if item.startswith('ipv6-') else 'A' }}
+      {{ item | trim | regex_replace('\\.$', '') }}
+      @{{ ffhh_dns_listen }} -p {{ ffhh_dns_port }}
+  register: ffhh_dns_forward
+  changed_when: false
+  loop: "{{ [ffhh_dns_test_v4_ptr, ffhh_dns_test_v6_ptr] }}"
+  retries: 3
+  delay: 3
+  until: ffhh_dns_forward.stdout | trim | length > 0
+  when: (ffhh_dns_enabled | bool) and not ansible_check_mode
+
+- name: Assert the forward answers match their addresses
+  ansible.builtin.assert:
+    that:
+      - item.stdout | trim | ip_normalize == addr | ip_normalize
+    fail_msg: "{{ item.item }} -> '{{ item.stdout | trim }}' (expected {{ addr }})"
+  loop: "{{ ffhh_dns_forward.results | default([]) }}"
+  loop_control:
+    loop_var: item
+    index_var: idx
+  vars:
+    addr: "{{ [ffhh_dns_test_v4, ffhh_dns_test_v6][idx] }}"
+  when: (ffhh_dns_enabled | bool) and not ansible_check_mode
+
+- name: Show the mesh DNS state
+  ansible.builtin.debug:
+    msg: >-
+      v4 static: {{ ffhh_dns_v4_static.stdout | default('') | trim }};
+      v4 synth: {{ ffhh_dns_v4_synth.stdout | default('') | trim }};
+      v6 static: {{ ffhh_dns_v6_static.stdout | default('') | trim }};
+      v6 synth: {{ ffhh_dns_v6_synth.stdout | default('') | trim }};
+      authoritative: v4={{ ffhh_dns_authoritative_v4 }} v6={{ ffhh_dns_authoritative_v6 }};
+      forward: {{ ffhh_dns_forward.results | default([]) | map(attribute='stdout')
+                 | map('trim') | join(' / ') }}
+  when: (ffhh_dns_enabled | bool) and not ansible_check_mode

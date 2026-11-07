@@ -1,0 +1,56 @@
+---
+# batman-adv kernel module from the pinned release.
+
+- name: Fetch batman-adv source at the pinned release
+  ansible.builtin.git:
+    repo: "https://git.open-mesh.org/batman-adv.git"
+    dest: "{{ batman_build_dir }}/batman-adv"
+    version: "{{ batman_adv_commit | default(batman_release) }}"
+    update: true
+
+- name: Build batman-adv module
+  ansible.builtin.command:
+    cmd: make -j{{ ansible_processor_vcpus | default(2) }}
+    chdir: "{{ batman_build_dir }}/batman-adv"
+    creates: "{{ batman_build_dir }}/batman-adv/net/batman-adv/batman-adv.ko"
+
+- name: Ensure module install directory
+  ansible.builtin.file:
+    path: "{{ batman_module_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install batman-adv module
+  ansible.builtin.copy:
+    src: "{{ batman_build_dir }}/batman-adv/net/batman-adv/batman-adv.ko"
+    dest: "{{ batman_module_dir }}/batman-adv.ko"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  register: batman_install
+
+- name: Refresh module dependencies
+  ansible.builtin.command: /sbin/depmod -a
+  when: batman_install is changed
+
+- name: Load batman-adv
+  ansible.builtin.command: /usr/sbin/modprobe batman-adv
+  changed_when: false
+
+- name: Read the loaded module version
+  ansible.builtin.command: /usr/sbin/modinfo -F version batman-adv
+  register: batman_version
+  changed_when: false
+  check_mode: false
+
+- name: Assert the loaded module matches the release
+  ansible.builtin.assert:
+    that:
+      - "(batman_release | regex_replace('^v', '')) in batman_version.stdout"
+    fail_msg: >-
+      The loaded module reports {{ batman_version.stdout }}; expected
+      {{ batman_release | regex_replace('^v', '') }}.
+    quiet: true

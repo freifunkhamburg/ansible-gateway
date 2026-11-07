@@ -1,0 +1,171 @@
+# ======================================================================
+# Shared configuration for every managed gateway.
+#
+# The automation targets homogeneous Debian 13 gateways. Gateway identity
+# (ordinal, served regions, address plan, allowlists) lives in
+# inventories/host_vars/<gateway>.yml; region facts live in
+# inventories/region_vars/<region>.yml. Nothing here repeats an address:
+# mesh addresses, BGP peers and VXLAN peers are derived in roles/regions
+# from the gateway registry and the ordinal.
+# ======================================================================
+
+# --- interface names (shared naming convention) ------------------------
+intra_as_if: intra-as
+uplink_if: uplink
+dummy_if: dummy0
+
+# --- gateway registry --------------------------------------------------
+# Every gateway in this mesh and its ordinal. Addresses inside the mesh are
+# derived from the ordinal; peers are derived from this list.
+# `bgp_peer: false` marks a gateway that is a VXLAN/address peer but not
+# part of the local BGP full mesh.
+gateways:
+  - { host: gw01, index: 1, bgp_peer: true }
+  - { host: gw02, index: 2, bgp_peer: true }
+  - { host: gw03, index: 3, bgp_peer: true }
+  - { host: gw04, index: 4, bgp_peer: false }
+  - { host: gw05, index: 5, bgp_peer: true }
+
+# Region whose /64 carries the gateway-to-gateway BGP sessions.
+gw_peer_region: hhsued
+
+# --- mesh --------------------------------------------------------------
+mesh_mtu: 1312
+mesh_v4_aggregate: "10.112.0.0/16"
+mesh_v6_aggregate: "2a03:2267::/32"
+
+# Forwarded service /32s published on every gateway: destination, mesh hop
+# and label. These are static natips routes in BIRD and are also reflected in
+# the firewall rules; the mesh hop is the address of the host the service
+# sits behind in the NBMA region.
+mesh_forward_hosts:
+  - { dest: "193.96.224.238/32", via: "10.112.96.21", label: "cloud" }
+  - { dest: "193.96.224.237/32", via: "10.112.96.23", label: "speicher" }
+
+# --- fastd -------------------------------------------------------------
+fastd_common_conf:
+  mtu: 1312
+  packet_mark: "0x6"
+  user: fastd
+  group: fastd
+  hide_ip: true
+  hide_mac: true
+  secure_handshakes: true
+  drop_capabilities: true
+
+fastd_peer_dir: /var/lib/fastd/ffhh-peers
+fastd_status_socket_dir: /run/fastd
+
+# --- batman ------------------------------------------------------------
+batman_hop_penalty: 5000
+batctl_path: /usr/local/sbin/batctl
+
+# One release for every gateway. The build role resolves this tag (a commit
+# pin is optional); the installed module and batctl are asserted against it.
+batman_release: v2026.3
+batman_compat_version: 15
+batman_build_dir: /opt/src
+
+# --- DHCP (Kea) --------------------------------------------------------
+kea_dhcp4_conf: /etc/kea/kea-dhcp4.conf
+kea_dhcp6_conf: /etc/kea/kea-dhcp6.conf
+kea_static_dir: /var/lib/dhcp-static
+kea_valid_lifetime: 1800
+kea_dhcp6_server_id: { enterprise_id: 3735928559, identifier: DEADBEEF }
+kea_dhcp6_info_refresh: 3600
+
+# NTP servers advertised to mesh clients. The names are IPv6-only in the ffhh
+# DNS; DHCPv4 option 42 uses the equivalent IPv4 aliases. DHCPv6 option 56
+# advertises the index addresses (Kea 3 truncates FQDN suboptions to 16 bytes).
+kea_ntp_server_names:
+  - "1.ntp.services.ffhh"
+  - "2.ntp.services.ffhh"
+  - "3.ntp.services.ffhh"
+kea_ntp_server_names_v4:
+  - "v4.1.ntp.services.ffhh"
+  - "v4.2.ntp.services.ffhh"
+  - "v4.3.ntp.services.ffhh"
+kea_ntp_v6_addresses:
+  - "2a03:2267:0001:0000:0000:0000:0000:0010"
+  - "2a03:2267:0002:0000:0000:0000:0000:0020"
+  - "2a03:2267:0003:0000:0000:0000:0000:0030"
+
+# --- DNS ---------------------------------------------------------------
+# Client-facing resolver backend:
+#   knot    -> Knot Resolver (built from source, port 53) — selected
+#   unbound -> kept renderable but de-selected
+dns_backend: knot
+knot_conf: /etc/knot-resolver/kresd.conf
+knot_unit: knot-resolver.service
+knot_workdir: /var/lib/knot-resolver
+knot_cache_dir: /run/knot-resolver
+knot_bin: /usr/local/sbin/kresd
+knot_user: knot-resolver
+knot_port: 53
+knot_cache_mb: 100
+knot_upstream_ffhh: "2a00:14b0:4200:3380:134::1"
+
+unbound_conf: /etc/unbound/unbound.conf
+unbound_conf_dir: /etc/unbound/unbound.conf.d
+unbound_access_control:
+  - { net: "0.0.0.0/0", action: refuse }
+  - { net: "127.0.0.0/8", action: allow }
+  - { net: "::0/0", action: refuse }
+  - { net: "::1", action: allow }
+  - { net: "::ffff:127.0.0.1", action: allow }
+  - { net: "10.0.0.0/8", action: allow }
+  - { net: "172.16.0.0/12", action: allow }
+  - { net: "fc00::/7", action: allow }
+  - { net: "2a03:2267::/32", action: allow }
+  - { net: "fe80::/10", action: allow }
+  - { net: "2001:0bf7::/32", action: allow }
+  - { net: "2a03:2260::/29", action: allow }
+  - { net: "2001:67c:2d50::/48", action: allow }
+
+# --- time --------------------------------------------------------------
+#   chrony  -> selected
+#   ntpsec  -> kept in roles/services but de-selected
+ntp_backend: chrony
+
+# Upstream time sources. Family (A/AAAA) is resolved by the daemon; no
+# per-gateway lines are needed.
+ntp_upstream_servers:
+  - ntp0.iphh.net
+  - ntp1.iphh.net
+  - ptbtime2.ptb.de
+  - ptbtime3.ptb.de
+
+# --- gateway health ----------------------------------------------------
+ffnord_conf: /etc/ffnord
+
+# --- maintenance jobs (cron) -------------------------------------------
+cron_jobs:
+  - { path: /etc/cron.d/fastd, schedule: "*/5 * * * *", user: root, command: "/usr/local/bin/update-fastd-keys pull" }
+  - { path: /etc/cron.d/gateway, schedule: "* * * * *", user: root, command: "/usr/local/bin/check-gateway" }
+  - { path: /etc/cron.d/check, schedule: "0,30 * * * *", user: root, command: "/root/check-sanitized.sh > /etc/motd.tail" }
+  - { path: /etc/cron.d/dhcp, schedule: "0,30 * * * *", user: root, command: "/usr/local/bin/update-dhcp-static pull" }
+
+# --- BIRD --------------------------------------------------------------
+# The AS is identical on every gateway; router id, source addresses and BGP
+# peers are derived from the gateway's own addressing.
+bird_local_as: 49009
+bird_config_dir: /etc/bird
+bird_v4_community_conf: /etc/bird/bird.conf.d/ffhh.conf
+bird_v4_ospf_conf: /etc/bird/bird.conf.d/ospf.conf
+bird_v6_community_conf: /etc/bird/bird6.conf.d/ffhh.conf
+bird_v6_ospf_conf: /etc/bird/bird6.conf.d/ospf.conf
+bird_v6_radv_conf: /etc/bird/bird6.conf.d/radv.conf
+
+# --- netfilter ---------------------------------------------------------
+iptables_v4: /etc/iptables/rules.v4
+iptables_v6: /etc/iptables/rules.v6
+
+# --- data repositories -------------------------------------------------
+# Cloned on the target itself (it has the network path to GitHub). Only the
+# static DHCP reservations are needed; the fastd peer repository is
+# provisioned outside this repository.
+data_repos:
+  - path: /var/lib/dhcp-static
+    remote: "https://github.com/freifunkhamburg/dhcp-static.git"
+    version: HEAD
+    owner: root

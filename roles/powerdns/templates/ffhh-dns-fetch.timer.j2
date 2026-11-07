@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh the community ffhh DNS zone data (roles/powerdns)
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec={{ ffhh_dns_fetch_interval }}
+RandomizedDelaySec=30
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

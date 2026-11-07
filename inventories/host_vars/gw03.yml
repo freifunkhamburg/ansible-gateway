@@ -1,0 +1,43 @@
+# gw03 — address reservation reference.
+#
+# Recorded as the reserved address plan (the existing gateway is not
+# provisioned by this automation). Addresses follow the same ordinal scheme
+# as every other gateway; the configuration is homogeneous.
+
+gw_index: 3
+ffhh_host_name: gw03
+
+gw_primary_region: hhsued
+gw_regions:
+  - hhsued
+  - hhwest
+  - hhnowe
+  - hhost
+
+intra_as_v4: "193.96.224.254/29"
+intra_as_v4_gw: "193.96.224.249"
+intra_as_v6: "2a03:2267:ffff:b00::3000/64"
+intra_as_v6_gw: "2a03:2267:ffff:b00::1"
+
+uplink_v4: "100.64.112.244/29"
+uplink_v4_peer: "100.64.112.241"
+
+gw_public_net: "193.96.224.0/24"
+gw_public_snat_range: "193.96.224.56-193.96.224.63"
+
+gw_kea_pools:
+  hhsued: "10.112.88.1-10.112.95.254"
+  hhwest: "10.112.120.1-10.112.127.254"
+  hhnowe: "10.112.216.1-10.112.223.254"
+  hhost: "10.112.248.1-10.112.255.254"
+
+gw_ssh_allowlist:
+  - "10.0.0.0/8"
+  - "49.12.225.141/32"
+  - "80.252.100.112/29"
+  - "168.119.77.189/32"
+  - "185.161.130.64/28"
+  - "193.96.224.128/25"
+  - "212.12.38.182/32"
+  - "212.12.51.134/32"
+  - "213.128.138.160/29"

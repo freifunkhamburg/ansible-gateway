@@ -1,0 +1,93 @@
+---
+# Base system: the shared Debian 13 basis for every gateway.
+#
+# All managed gateways run the same release. The check is intentionally a
+# release assertion, not a "recorded OS" comparison: a host on another Debian
+# release is refused instead of being templated into a different shape.
+- name: Assert the gateway runs Debian 13
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution == "Debian"
+      - ansible_facts.distribution_major_version == "13"
+    fail_msg: >-
+      The target is {{ ansible_facts.distribution }}
+      {{ ansible_facts.distribution_version }}; this automation only supports
+      Debian 13. Provision the host with Debian 13 before applying it.
+    quiet: true
+
+- name: Render gateway sysctl drop-in (/etc/sysctl.d/01-gateway.conf)
+  ansible.builtin.template:
+    src: 01-gateway.conf.j2
+    dest: /etc/sysctl.d/01-gateway.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Apply sysctl drop-in
+  ansible.builtin.command: /sbin/sysctl -p /etc/sysctl.d/01-gateway.conf
+  register: sysctl_apply
+  changed_when: false
+  failed_when: false
+
+# --- log retention -----------------------------------------------------
+- name: Ensure the journald drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render the journald limits drop-in
+  ansible.builtin.template:
+    src: 50-journald-limits.conf.j2
+    dest: /etc/systemd/journald.conf.d/50-journald-limits.conf
+    owner: root
+    group: root
+    mode: "0644"
+  register: journald_limits
+
+- name: Restart journald to apply the limits
+  ansible.builtin.systemd_service:
+    name: systemd-journald
+    state: restarted
+  when: journald_limits.changed
+
+# --- auditd ------------------------------------------------------------
+- name: Install auditd
+  ansible.builtin.apt:
+    name: auditd
+    state: present
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  when: audit_enabled | bool
+
+- name: Render the audit ruleset
+  ansible.builtin.template:
+    src: audit-rules.j2
+    dest: /etc/audit/rules.d/ffhh.rules
+    owner: root
+    group: root
+    mode: "0640"
+  register: audit_rules
+  when: audit_enabled | bool
+
+- name: Enable and start auditd
+  ansible.builtin.systemd_service:
+    name: auditd
+    enabled: true
+    state: started
+  when: (audit_enabled | bool) and not ansible_check_mode
+
+- name: Reload the audit rules when they changed
+  ansible.builtin.command: /usr/sbin/augenrules --load
+  changed_when: true
+  when: (audit_enabled | bool) and audit_rules.changed and not ansible_check_mode
+
+- name: Stop and disable auditd when it is turned off
+  ansible.builtin.systemd_service:
+    name: auditd
+    enabled: false
+    state: stopped
+  when: not (audit_enabled | bool)
+  failed_when: false

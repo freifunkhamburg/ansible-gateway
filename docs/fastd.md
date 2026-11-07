@@ -68,7 +68,7 @@ include "/etc/fastd/common.conf";
 interface "vpn-hhsued-05";
 bind any:10003;
 include "/etc/fastd/secret-hhsued05.conf";
-status socket "/var/run/fastd/fastd-status.hhsued-05.sock";
+status socket "/run/fastd/fastd-status.hhsued-05.sock";
 include peers from "/var/lib/fastd/ffhh-peers";
 ```
 
@@ -163,6 +163,30 @@ and `network.target` has `After=networking.service`, so the
 `/etc/network/interfaces.d` hooks (`ip tuntap add`, MAC, `batctl … interface add`) run
 before fastd starts.
 
+### The status socket directory is tmpfs — restored at boot
+
+`/run/fastd` is on tmpfs, so it is empty after every reboot. The role creates
+it during a run, but that does not happen at boot, and fastd then exits with
+`unable to open status socket lock file: No such file or directory` — every
+instance `failed`, all TAPs still present and attached, but no tunnels. The
+role therefore also installs `/etc/tmpfiles.d/fastd.conf`:
+
+```
+d /run/fastd 0755 fastd fastd -
+```
+
+`systemd-tmpfiles-setup.service` runs in `sysinit.target`, i.e. before
+`network.target`, so the directory (with its `fastd:fastd` ownership) exists
+before any `fastd@*` unit starts. The role applies the same entry immediately
+(`systemd-tmpfiles --create`) so the state is correct without a reboot, and
+asserts the directory exists with the right owner. Verified on gw05 by
+deleting `/run/fastd`, running the boot-time tmpfiles pass and starting all
+eight instances: all `active`, sockets created in `/run/fastd`.
+
+The path is `/run/fastd` (not the legacy `/var/run/fastd`, which systemd
+rewrites with a warning at every boot).
+
+
 The one caveat: if a TAP is deleted externally, fastd creates a fresh
 non-persistent TAP (random MAC, not attached). `roles/fastd` converts
 that back on the next play run (`tap_persist` + `tap_attach`),
@@ -187,7 +211,7 @@ With the one test peer connected, batman already sees a node via
 
 `fastd v23` at `/usr/bin/fastd` (built from tag v23), the `fastd` system
 user/group, `/etc/fastd/common.conf`, eight instance directories and configs,
-`/lib/systemd/system/fastd@.service`, `/var/run/fastd` (owned by `fastd`),
+`/lib/systemd/system/fastd@.service`, `/run/fastd` (owned by `fastd`, restored at boot by `/etc/tmpfiles.d/fastd.conf`),
 eight running instances (`fastd@<region>05`, `@<region>08`), eight listening
 UDP ports 10003–10010, eight `vpn-*` TAPs with the expected MACs, and
 `/var/lib/fastd/ffhh-peers/thisisatestonly`. Second play run: `changed=0`.

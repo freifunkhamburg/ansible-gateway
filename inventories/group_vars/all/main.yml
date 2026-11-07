@@ -54,7 +54,7 @@ fastd_common_conf:
   drop_capabilities: true
 
 fastd_peer_dir: /var/lib/fastd/ffhh-peers
-fastd_status_socket_dir: /var/run/fastd
+fastd_status_socket_dir: /run/fastd
 
 # --- batman ------------------------------------------------------------
 batman_hop_penalty: 5000

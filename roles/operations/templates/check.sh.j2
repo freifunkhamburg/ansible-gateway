@@ -103,7 +103,7 @@ echo -n -e "\e[39mfastd: number of running instances $fastd_count\t\t\t\t"
 
 # fastd instances may be configured but not started (no operator secrets yet),
 # so the socket directory can be empty on this gateway; the loop is skipped.
-SOCKETS=$(ls /var/run/fastd/*.sock 2>/dev/null || true)
+SOCKETS=$(ls /run/fastd/*.sock 2>/dev/null || true)
 for f in $SOCKETS
 do
     export FASTD_SOCKET=$f

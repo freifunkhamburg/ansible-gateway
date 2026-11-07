@@ -1,0 +1,10 @@
+{#
+  The status socket lives in {{ fastd_status_socket_dir }}, which is on /run
+  (tmpfs): it is empty on every boot, so the directory has to be recreated
+  before the units start. The role creates it during the run, but a reboot
+  does not, and fastd then exits with
+  "unable to open status socket lock file: No such file or directory".
+  systemd-tmpfiles runs in sysinit.target, before network/multi-user, so this
+  entry restores the directory and its ownership at boot.
+#}
+d {{ fastd_status_socket_dir }} 0755 {{ fastd_common_conf.user }} {{ fastd_common_conf.group }} -

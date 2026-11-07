@@ -256,6 +256,43 @@
     mode: "0644"
   notify: reload fastd
 
+# /run is tmpfs: the status socket directory exists during the run because
+# the role creates it, but nothing recreates it at boot, so every fastd unit
+# would start against a missing directory and exit with
+# "unable to open status socket lock file". A tmpfiles.d entry restores it in
+# sysinit.target, which runs before network/multi-user.target.
+- name: Install the tmpfiles entry for the status socket directory
+  ansible.builtin.template:
+    src: tmpfiles.conf.j2
+    dest: /etc/tmpfiles.d/fastd.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Apply the tmpfiles entry now (boot will do the same)
+  ansible.builtin.command:
+    cmd: /usr/bin/systemd-tmpfiles --create /etc/tmpfiles.d/fastd.conf
+  register: fastd_tmpfiles
+  changed_when: false
+
+- name: Stat the status socket directory
+  ansible.builtin.stat:
+    path: "{{ fastd_status_socket_dir }}"
+  register: fastd_status_stat
+
+- name: Assert the status socket directory exists with the right owner
+  ansible.builtin.assert:
+    that:
+      - fastd_status_stat.stat.exists
+      - fastd_status_stat.stat.isdir
+      - fastd_status_stat.stat.pw_name == fastd_common_conf.user
+      - fastd_status_stat.stat.gr_name == fastd_common_conf.group
+    fail_msg: >-
+      {{ fastd_status_socket_dir }} is {{ 'missing' if not fastd_status_stat.stat.exists
+                                          else 'not owned by ' ~ fastd_common_conf.user }};
+      fastd cannot create its status socket and the instances will exit.
+
+
 - name: Assert the batman interfaces exist before attaching tunnels
   ansible.builtin.stat:
     path: "/sys/class/net/{{ item.bat_if }}"
@@ -323,6 +360,50 @@
     - fastd_start | bool
     - fastd_secrets is defined
   changed_when: false
+
+- name: Verify every fastd instance is running
+  ansible.builtin.command:
+    cmd: "systemctl is-active fastd@{{ item.name }}"
+  loop: "{{ fastd_instances }}"
+  register: fastd_active
+  changed_when: false
+  retries: 3
+  delay: 2
+  until: fastd_active.stdout | trim == 'active'
+  when:
+    - fastd_start | bool
+    - fastd_secrets is defined
+
+- name: Assert every fastd instance is active
+  ansible.builtin.assert:
+    that:
+      - item.stdout | trim == 'active'
+    fail_msg: "fastd@{{ item.item.name }} is '{{ item.stdout | trim }}'"
+  loop: "{{ fastd_active.results | default([]) }}"
+  when:
+    - fastd_start | bool
+    - fastd_secrets is defined
+
+- name: Stat the per-instance status sockets
+  ansible.builtin.stat:
+    path: "{{ fastd_status_socket_dir }}/fastd-status.{{ item.iface | replace('vpn-', '') }}.sock"
+  loop: "{{ fastd_instances }}"
+  register: fastd_sockets
+  when:
+    - fastd_start | bool
+    - fastd_secrets is defined
+
+- name: Assert each instance wrote its status socket
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+    fail_msg: >-
+      {{ item.stat.path }} is missing for fastd@{{ item.item.name }};
+      the instance started outside {{ fastd_status_socket_dir }}.
+  loop: "{{ fastd_sockets.results | default([]) }}"
+  when:
+    - fastd_start | bool
+    - fastd_secrets is defined
 
 - name: Report the gated state when no secrets are supplied
   ansible.builtin.debug:

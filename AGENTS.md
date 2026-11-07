@@ -13,6 +13,11 @@ as history reference — never push there).
 - Remotes: `origin` = Gitea (default for all pushes); `github` =
   `freifunkhamburg/ansible-gateway` (public mirror) — push there **only when
   explicitly asked** (pre-push hook requires `ALLOW_GITHUB_PUSH=1`).
+  The mirror carries **the same history as `origin main`** — every commit,
+  not a collapsed snapshot — but **only `main`**: feature branches are
+  work-in-progress and are never published. Secrets are not published
+  either; history is secret-free by construction (§6), so no filtering
+  beyond that is needed.
 - Run ansible via `.venv-ansible` (symlink to `/projects/.toolchain/ansible-venv`,
   ansible-core 2.21).
 - Vault: `inventories/group_vars/all/vault.yml` and `.vault_pass` are operator
@@ -59,8 +64,13 @@ than to `main`. For changes that can take a service down, state the rollback
 and install artifacts before any config that references them.
 
 Small, obvious fixes (docs, comments, typos) may go straight to `main`.
-Publish to GitHub only on explicit request (see §0); collapse `main` into a
-single commit unless leo asks for full history.
+Publish to GitHub only on explicit request (see §0). The mirror tracks
+`origin main` commit-for-commit (features excluded), so after publishing,
+`git log main` and `git log github/main` are the same list. Because the
+public mirror must never inherit an unpublished branch, publish with
+`git push github main` (fast-forward) and only rewrite it deliberately —
+with `--force-with-lease` against the SHA you inspected — when catching up
+a mirror that is behind or diverged.
 
 ## 3. One run
 

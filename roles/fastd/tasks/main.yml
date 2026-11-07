@@ -193,7 +193,7 @@
     owner: root
     group: root
     mode: "0644"
-  notify: reload fastd
+  notify: restart fastd instances
 
 - name: Render the per-instance fastd.conf files
   ansible.builtin.template:
@@ -203,7 +203,7 @@
     group: root
     mode: "0644"
   loop: "{{ fastd_instances }}"
-  notify: reload fastd
+  notify: restart fastd instances
 
 - name: Check the secrets the operator must supply
   ansible.builtin.assert:
@@ -342,6 +342,33 @@
   register: tap_attach
   changed_when: "'attached' in tap_attach.stdout"
 
+# --- bind addresses ------------------------------------------------------
+# The instances listen on the intra-as public addresses only. The addresses
+# must already be configured (the network role runs earlier in the play),
+# otherwise fastd fails to bind and exits.
+- name: Read the intra-as addresses
+  ansible.builtin.command:
+    cmd: "ip -o addr show dev {{ intra_as_if }}"
+  register: fastd_intra_as_addr
+  changed_when: false
+  when:
+    - fastd_start | bool
+    - fastd_secrets is defined
+
+- name: Assert every bind address is configured on the intra-as interface
+  ansible.builtin.assert:
+    that:
+      - fastd_intra_as_addr.stdout is search('(^|\s)' ~ item ~ '/')
+    fail_msg: >-
+      fastd would bind {{ item }}, but it is not configured on
+      {{ intra_as_if }}. Check intra_as_v4/intra_as_v6 and that the network
+      role ran before this one.
+  loop: "{{ fastd_bind_addresses }}"
+  when:
+    - fastd_start | bool
+    - fastd_secrets is defined
+    - "'any' not in fastd_bind_addresses"
+
 - name: Enable and start the fastd instances
   ansible.builtin.service:
     name: "fastd@{{ item.name }}"
@@ -351,6 +378,12 @@
   when:
     - fastd_start | bool
     - fastd_secrets is defined
+
+# The bind addresses are socket-level: a reload (SIGHUP) re-reads peers but
+# does not rebind, so a changed fastd.conf must restart the instance before
+# the listener check below.
+- name: Flush the fastd restart handler
+  ansible.builtin.meta: flush_handlers
 
 - name: Confirm the expected tunnel MACs and link state on the TAPs
   ansible.builtin.command:
@@ -405,11 +438,46 @@
     - fastd_start | bool
     - fastd_secrets is defined
 
-- name: Report the gated state when no secrets are supplied
+# The wildcard is not used: each instance must listen on exactly the intra-as
+# addresses, i.e. one v4 and one v6 socket, so a peer cannot reach an instance
+# through the uplink, a mesh interface or the loopback.
+- name: Verify each instance listens only on the intra-as addresses
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      port={{ item.port }}
+      got=$(ss -lunH "sport = :$port" | awk '{print $4}' | sort -u | tr '\n' ' ')
+      want=$(printf '%s\n' {% for a in fastd_bind_addresses %}"{% if ':' in a %}[{{ a }}]{% else %}{{ a }}{% endif %}:{{ item.port }}" {% endfor %} | sort -u | tr '\n' ' ')
+      if [ "$got" != "$want" ]; then
+        echo "port $port listens on '$got', expected '$want'" >&2
+        exit 1
+      fi
+      echo "port $port -> $got"
+  loop: "{{ fastd_instances }}"
+  register: fastd_listen_verify
+  changed_when: false
+  when:
+    - fastd_start | bool
+    - fastd_secrets is defined
+    - "'any' not in fastd_bind_addresses"
+
+- name: Show the bound fastd sockets
+  ansible.builtin.debug:
+    msg: "{{ fastd_listen_verify.results | default([]) | map(attribute='stdout')
+             | map('trim') | join(' | ') }}"
+  when:
+    - fastd_start | bool
+    - fastd_secrets is defined
+    - "'any' not in fastd_bind_addresses"
+
+- name: Report the gated state when the instances are not started
   ansible.builtin.debug:
     msg: >-
       fastd {{ fastd_desired_tag }} is installed and configured for
       {{ fastd_instances | length }} instances, but NOT started:
-      no operator secrets (fastd_secrets) are available. Supply them via
-      ansible-vault and set fastd_start=true to bring the tunnels up.
+      {{ 'fastd_start is false (operator secrets are available).'
+         if fastd_secrets is defined
+         else 'no operator secrets (fastd_secrets) are available.' }}
+      Run with -e fastd_start=true --vault-password-file .vault_pass to bring
+      the tunnels up.
   when: not (fastd_start | bool and fastd_secrets is defined)

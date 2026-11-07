@@ -62,15 +62,7 @@ group "fastd";
 packet mark 0x6;
 ```
 
-Per instance:
-```
-include "/etc/fastd/common.conf";
-interface "vpn-hhsued-05";
-bind any:10003;
-include "/etc/fastd/secret-hhsued05.conf";
-status socket "/run/fastd/fastd-status.hhsued-05.sock";
-include peers from "/var/lib/fastd/ffhh-peers";
-```
+
 
 ### Key scope
 
@@ -81,9 +73,7 @@ own public key, which is what the operator asked for when generating keys for
 all instances. It is a deliberate departure from the suffix-shared
 layout.
 
-The unit is `fastd@.service`
-(`ExecStart=/usr/bin/fastd --syslog-level info --syslog-ident fastd@%I -c
-/etc/fastd/%I/fastd.conf`, `Type=notify`).
+
 
 ## Secrets (now supplied via an encrypted vault)
 
@@ -213,5 +203,7 @@ With the one test peer connected, batman already sees a node via
 user/group, `/etc/fastd/common.conf`, eight instance directories and configs,
 `/lib/systemd/system/fastd@.service`, `/run/fastd` (owned by `fastd`, restored at boot by `/etc/tmpfiles.d/fastd.conf`),
 eight running instances (`fastd@<region>05`, `@<region>08`), eight listening
-UDP ports 10003–10010, eight `vpn-*` TAPs with the expected MACs, and
-`/var/lib/fastd/ffhh-peers/thisisatestonly`. Second play run: `changed=0`.
+UDP ports 10003–10010 on the two `intra-as` public addresses (16 sockets: one
+v4 and one v6 per port, no wildcard), eight `vpn-*` TAPs with the expected
+MACs, and `/var/lib/fastd/ffhh-peers/thisisatestonly`. Second play run:
+`changed=0`.

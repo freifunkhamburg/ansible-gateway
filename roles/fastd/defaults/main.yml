@@ -52,3 +52,17 @@ fastd_start: false     # start instances once secrets are available
 fastd_peers:
   - name: thisisatestonly
     key: "2dd233274eb5da968135c3faeadabf42678c32a52923bdcc2efc76f2a8da04ee"
+
+# --- bind addresses -----------------------------------------------------
+# The tunnel endpoints are the public addresses of the intra-as interface, so
+# an instance binds exactly those two addresses instead of the wildcard
+# (`any`), which listens on every local address -- uplink, mesh, loopback.
+# Both families are rendered on every instance: fastd opens one socket per
+# `bind`, so v4 and v6 peers each find a matching address family.
+#
+# The CIDR suffix is stripped (193.96.224.213/29 -> 193.96.224.213) and empty
+# entries (a host without an intra-as address of that family) are dropped.
+# `-e 'fastd_bind_addresses=["any"]'` restores the wildcard.
+fastd_bind_addresses: >-
+  {{ [intra_as_v4 | default(''), intra_as_v6 | default('')]
+     | map('addr_only') | select | list }}

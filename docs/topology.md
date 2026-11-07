@@ -197,7 +197,9 @@ sequenceDiagram
 ```
 
 **Reading it.** Inbound mesh traffic enters on the transit side — peers dial
-the `intra-as` address (fastd binds `any:<port>`) — is decapsulated onto a
+the `intra-as` public addresses (`193.96.224.213` and
+`2a03:2267:ffff:d00::5000`; each fastd instance binds exactly those, not the
+wildcard) — is decapsulated onto a
 TAP, and lands in `bat-<region>`. From there the policy rules send it to **table 42** (the mesh
 table BIRD populates), netfilter clamps MSS and rewrites the source to one of
 the published `193.96.224.24-31`, and it leaves via `uplink`. Return traffic

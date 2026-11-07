@@ -3,3 +3,17 @@
   ansible.builtin.command: pkill -HUP -x fastd
   changed_when: true
   failed_when: false
+
+# A changed instance config can carry a different `bind`, and SIGHUP only
+# re-reads peers -- it does not rebind sockets. A restart is the only way to
+# apply bind/interface/mtu changes.
+- name: restart fastd instances
+  ansible.builtin.shell: |
+    set -u
+    for n in {{ fastd_instances | map(attribute='name') | join(' ') }}; do
+      systemctl restart "fastd@$n" || true
+    done
+  changed_when: true
+  when:
+    - fastd_start | bool
+    - fastd_secrets is defined

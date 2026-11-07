@@ -14,7 +14,7 @@ the comparison harness is `tools/knot-test-compare.py`, installed as
 ## Version policy and build
 
 - Debian 13: `knot-resolver` 5.7.5-1 — too old for "most recent".
-- Upstream newest release: **v6.5.1** (2026-10-22). The role resolves it with
+- The last build resolved **v6.5.1**; the role resolves the newest release with
   `git ls-remote --tags --refs`, keeps only `vX.Y.Z` tags, and takes `sort -V`
   tail. Pin with `-e knot_test_tag=v6.5.1` if a release should not move.
 - Source: `https://github.com/CZ-NIC/knot-resolver` into

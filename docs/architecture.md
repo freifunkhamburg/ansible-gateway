@@ -1,5 +1,9 @@
 # Architecture
 
+Figures (software components, Linux interfaces, packet paths) live in
+[topology.md](topology.md). The text here describes the same model in prose;
+if a template changes the topology, update the matching figure.
+
 ## Runtime model
 
 A gateway is a Debian 13 host with two NICs:
@@ -26,13 +30,16 @@ and NATs the mesh into its published block.
 7. `bird` — OSPF, BGP, static natips routes, RA.
 8. `services` — DNS backend selection, chrony/ntpsec selection, vnstat,
    fail2ban.
-9. `knot` — client-facing Knot Resolver (build dependency `knot_build`).
-10. `fastd` — build and render instances; start only with secrets.
-11. `ssh` — hardening and administrator keys.
-12. `operations` — health scripts, cron (gateway/fastd/check/vnstat and the
+9. `powerdns` — authoritative loopback DNS for the zones this gateway
+   owns (`ffhh`, `112.10.in-addr.arpa`, the region reverse and clients
+   zones); see [knot-resolver.md](knot-resolver.md).
+10. `knot` — client-facing Knot Resolver (build dependency `knot_build`).
+11. `fastd` — build and render instances; start only with secrets.
+12. `ssh` — hardening and administrator keys.
+13. `operations` — health scripts, cron (gateway/fastd/check/vnstat and the
     periodic batman-health record), vnstat interface policy, motd.
-13. `mesh_announce` — respondd from upstream mesh-announce.
-14. `firewall` — render and apply netfilter last.
+14. `mesh_announce` — respondd from upstream mesh-announce.
+15. `firewall` — render and apply netfilter last.
 
 This is a dependency order, not a series of deployment stages. The run is
 idempotent: the build roles rebuild only when the pin or output is missing;
@@ -46,13 +53,29 @@ For gateway ordinal `N`:
 - bat IPv6 host = region prefix + `N * 0x10`;
 - bat MAC = `de:ad:be:ef:<N*16>:<region_index>`;
 - fastd instance = `gw_index + 3*(slot-1)`;
-- Kea pool = assigned per gateway, disjoint `/21` blocks inside the region `/19`.
+- Kea pool = a per-gateway range inside the region `/19`, starting at the
+  second `/24` of a slot (gw05: `10.112.65.0-10.112.71.254`); the first
+  `/24` stays free for static reservations. Gateways of one region must use
+  disjoint ranges, which `roles/regions` asserts.
 
 The registry in `group_vars/all` is the only place gateways are listed. Adding
 a gateway means adding its `host_vars` file and one registry entry; peers and
 VXLAN addresses update everywhere.
 
 ## DNS and time backends
+
+Two resolver layers exist, and they are not interchangeable:
+
+- `roles/knot` is the **client-facing** resolver (kresd), selected by
+  `dns_backend` (Knot Resolver default, or the renderable unbound setup). It
+  listens on `127.0.0.1` and on each region's gateway address.
+- `roles/powerdns` is the **authoritative** server for the zones the gateway
+  owns, on `127.0.0.2:53` — loopback only, so kresd forwards to it and no
+  firewall port is opened. It serves content transferred from the community
+  (`ffhh-dns-fetch`, `ffhh` + `112.10.in-addr.arpa`) and synthesizes the rest
+  in the community hex naming. Enabled per host by `ffhh_dns_enabled`, which
+  reverse families it is authoritative for by `ffhh_dns_authoritative_v4` /
+  `ffhh_dns_authoritative_v6` (both true on gw05).
 
 `dns_backend` selects Knot Resolver (default) or the renderable unbound setup.
 `ntp_backend` selects chrony (default) or renderable ntpsec. Both alternates

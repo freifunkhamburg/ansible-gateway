@@ -13,7 +13,7 @@ Kea servers. Which transports can carry them:
 ## Where the three servers are
 
 `1./2./3.ntp.services.ffhh` are DNS aliases for the **gw01/gw02/gw03** index
-addresses of the client's region (`roles/served_regions` numbering):
+addresses of the client's region (`roles/regions` numbering):
 
 | IPv6 name | IPv4 alias | gateway | address inside the client's region |
 | --- | --- | --- | --- |
@@ -22,8 +22,8 @@ addresses of the client's region (`roles/served_regions` numbering):
 | `3.ntp.services.ffhh` | `v4.3.ntp.services.ffhh` | gw03 | `2a03:2267:<region>::30` / `10.112.<prefix>.253` |
 
 The un-prefixed names are IPv6-only. The `v4.*` aliases carry the `A`
-records (see `nodeffhh.conf` below), so IPv4-only clients can resolve the
-servers by name.
+records (see "DNS: the NTP names and their IPv4 aliases" below), so IPv4-only
+clients can resolve the servers by name.
 
 The managed gateway runs `chrony` (the renderable alternative is `ntpsec`).
 The daemon listens on `:123` on the bat interfaces, so the gateway is a real
@@ -34,7 +34,7 @@ alone would reject those link-local sources.
 ## DHCPv4 — option 42 (`ntp-servers`)
 
 Rendered per subnet by `roles/kea/templates/kea-dhcp4.conf.j2` from
-`ntp_v4`, which `roles/served_regions` composes as
+`ntp_v4`, which `roles/regions` composes as
 `host_in(251/252/253)` of the region's `v4_net`:
 
 ```
@@ -105,14 +105,18 @@ firmware applies directly).
 The RA config still announces RDNSS (`2a03:2267:<region>::<gw host>`), which is
 DNS, not NTP.
 
-## DNS: `nodeffhh.conf` (IPv4 aliases)
+## DNS: the NTP names and their IPv4 aliases
 
-The NTP name data lives in `roles/services/files/unbound/nodeffhh.conf`
-(the file maintains the gw05 version, taken over from the live
-`/etc/unbound/unbound.conf.d/nodeffhh.conf`). Besides the existing per-region
-`AAAA` data it now has a `redirect` zone for each `v4.N.ntp.services.ffhh`
-with tags `ntpNv4-<region>`, whose `A` data is the same region-specific
-address DHCPv4 announces:
+The default backend (Knot Resolver, `dns_backend: knot`) renders all of them
+from the region table in `roles/knot/templates/kresd.conf.j2`: one
+`policy.suffix` rule per name per client subnet (`view.rule_src`), with the
+`AAAA` data from `host_in(16/32/48)` and the `v4.N` aliases carrying the same
+`A` addresses DHCPv4 announces. The unbound backend keeps the equivalent in
+`roles/services/files/unbound/nodeffhh.conf` (a per-region `redirect` zone per
+`v4.N.ntp.services.ffhh`, tagged `ntpNv4-<region>`); `roles/services` renders
+that file only when `dns_backend: unbound`.
+
+Per-region `A` data (identical in both backends):
 
 ```
 10.112.64.0/19   v4.1 -> 10.112.64.251   v4.2 -> .252   v4.3 -> .253
@@ -121,14 +125,16 @@ address DHCPv4 announces:
 10.112.224.0/19  v4.1 -> 10.112.224.251  v4.2 -> .252   v4.3 -> .253
 ```
 
-The `v4` tags are attached to both the IPv4 and IPv6 netblocks, so IPv6
-clients get the IPv4 aliases too. Verified live on gw05 (`dig` from the
-sued/west/hhost gateway and client addresses): every region resolves its own
-three addresses, and the un-prefixed names still have no `A` record.
+The rules are registered for both the IPv4 and IPv6 region subnets
+(`r.subnets`), so IPv6 clients get the IPv4 aliases too. Verified live on gw05
+(`dig` from the sued/west/host gateway and client addresses): every region
+resolves its own three addresses, and the un-prefixed names still have no `A`
+record.
 
 ## Sources
 
-`roles/served_regions` (ntp_v4 composition), `roles/kea` templates,
-`roles/services/files/unbound/nodeffhh.conf`, and
+`roles/regions` (`ntp_v4` / `ntp6` composition), `roles/kea` templates,
+`roles/knot/templates/kresd.conf.j2` (default backend) and
+`roles/services/files/unbound/nodeffhh.conf` (unbound backend), and
 `kea_ntp_server_names` / `kea_ntp_server_names_v4` / `kea_ntp_v6_addresses` in
 `inventories/group_vars/all/main.yml`.

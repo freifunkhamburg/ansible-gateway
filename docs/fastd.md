@@ -22,9 +22,9 @@ of the single `playbooks/gateway.yml` run.
   These are what fastd 23's meson setup actually requires (each one was hit as
   a missing dependency during the first build).
 
-At the time of writing the newest tag is **v23**, and Debian 13's package
-is `23-2` — the same upstream release; the role builds from source so the
-"latest" rule holds even when a distro package lags later.
+The last build resolved **v23**, and Debian 13's package is `23-2` — the same
+upstream release; the role builds from source, so the "latest" rule holds even
+when a distro package lags later.
 
 ## Instance layout
 
@@ -38,8 +38,10 @@ TAP is `vpn-<region>-<NN>`. Ports are region facts (10003 … 10010).
 | hhnowe | `hhnowe05`, 10007 | `hhnowe08`, 10008 |
 | hhost | `hhost05`, 10009 | `hhost08`, 10010 |
 
-That is **8 instances**, asserted against `gw_expect_fastd_instances: 8` in
-`host_vars/gw05.yml` — the same two-slot-per-region count.
+That is **8 instances**, asserted against the derived
+`gw_expect_fastd_instances` (`roles/regions`; 8 = four regions × two slots) —
+the same two-slot-per-region count.
+
 Tunnel MAC suffix stays the expected scheme (mac_prefix + instance number:
 `de:ad:be:ef:50:15`, `…:18`, etc. for gw05).
 

@@ -7,8 +7,8 @@ setup stays in the repository but is de-selected; switch back with
 ## Roles and playbook
 
 - `roles/knot_build` — resolves the newest upstream tag
-  (`git ls-remote --tags --refs` → keep `vX.Y.Z` → `sort -V | tail -1`,
-  currently **6.5.1**), checks out with submodules, builds with `meson`/`ninja`
+  (`git ls-remote --tags --refs` → keep `vX.Y.Z` → `sort -V | tail -1`; the
+  last build resolved **6.5.1**), checks out with submodules, builds with `meson`/`ninja`
   under `--prefix=/usr/local --libdir=lib`, installs into
   `/usr/local/sbin/kresd` and `/usr/local/lib/knot-resolver`, and purges the
   distro `knot-resolver` package. Skips rebuild when the installed version and
@@ -64,112 +64,217 @@ the name from the address itself: `ipv6-<16 nibbles>.<region>.clients.hamburg.fr
 
 kresd cannot follow that delegation: `srv03.hamburg.freifunk.net` is an
 auth-only PTR responder (it returns NXDOMAIN for `NS`/`SOA` at the zone apex),
-so kresd reports `LAME_DELEGATION` and `SERVFAIL`s. The IPv6 reverse zone is
-therefore forwarded to the community DNS and marked `DNSSEC_INSECURE`.
+so kresd reports `LAME_DELEGATION` and `SERVFAIL`s. Hence the IPv6 reverse
+space is not resolved by recursion here:
 
-The explicit `NO_0X20` flag is required on these zones: kresd randomises the
-case of the QNAME it sends upstream (`...A.2.IP6.aRpA.`). The community DNS
-forwards that mixed-case name to a case-sensitive backend, which returns
-`NXDOMAIN` unless the name is already cached. `NO_0X20` keeps the forward
-queries lower-case, as unbound sent them.
+- the served regions' `/64` zones are answered by the local PowerDNS
+  (`roles/powerdns`, `ffhh_dns_authoritative_v6`) as authoritative zones;
+- every other `/64` (and the rest of the `/32`) is forwarded to the community
+  DNS with `NO_0X20` and `DNSSEC_INSECURE`.
+
+The explicit `NO_0X20` flag is required on the zones still forwarded upstream:
+kresd randomises the case of the QNAME it sends upstream
+(`...A.2.IP6.aRpA.`). The community DNS forwards that mixed-case name to a
+case-sensitive backend, which returns `NXDOMAIN` unless the name is already
+cached. `NO_0X20` keeps those forward queries lower-case, as unbound sent
+them. Queries to the local PowerDNS do not need it -- that backend lowercases
+the QNAME itself.
 
 The gateway PTRs (`2a03:2267:R::N*0x10` -> `gwNN-new.<region>.hamburg.freifunk.net`)
-come from the community DNS, not from local inventory. A stale negative entry
-can still make gw05 diverge from a legacy gateway, so the knot role probes
-`gw2`'s primary-region PTR after start and, if it returns nothing, stops
-kresd, removes `data.mdb` and retries once.
+are the same names locally and upstream: for served regions the local
+PowerDNS generates them from the inventory (`ffhh_dns_v6_gateway_ordinals`),
+for other regions they come from the community DNS. A stale negative entry
+can still make gw05 diverge, so the knot role probes the primary region's
+gateway PTR after start and, if it returns nothing, stops kresd, removes
+`data.mdb` and retries once.
 
 Two limits of the upstream data, both identical to the legacy unbound gateway:
 
 - **No IPv4 client PTRs upstream.** The community DNS only serves gateway
   names in `112.10.in-addr.arpa`; a client address in the mesh `/16` answers
-  `NXDOMAIN`. The gateway answers the zone from a local authoritative Knot
-  DNS instance (`roles/knotd`, optional via `knotd_enabled`) that mirrors
-  those static records over AXFR. This is necessary because kresd ships the
-  RFC 6303 empty zone `10.in-addr.arpa`, which shadows our subdomain
-  `112.10.in-addr.arpa` and would answer `NXDOMAIN` before kresd even asks
-  upstream -- including for `gw05.ffhh`. The zone is attached to kresd's
-  rules DB with `policy.rule_forward_add(..., {auth = true, dnssec = false})`,
-  not with `policy.FORWARD`, for the same reason. Client PTRs are still
-  synthesised only from this gateway's Kea leases (**opt-in**, see below), so
-  unassigned addresses keep answering `NXDOMAIN` and the naming schemes stay
-  unchanged.
-- **Only ordinals 1-3 have gateway names.** `2a03:2267:R::10/::20/::30`
-  resolve to `gwNN-new.<region>.hamburg.freifunk.net`; addresses for ordinals
-  4 and 5 (including gw05's own address `::50`) fall back to the client naming
-  pattern `ipv6-<16 nibbles>.<region>.clients.hamburg.freifunk.net`.
-  Upstream also maps `2a03:2267:4::1` to `knoten.ffhh.`
+  `NXDOMAIN`. The gateway answers the zone from a local authoritative
+  PowerDNS instance (`roles/powerdns`, optional via `ffhh_dns_enabled`) that
+  serves a transferred copy of those records plus synthesis. This is
+  necessary because kresd ships the RFC 6303 empty zone `10.in-addr.arpa`,
+  which shadows our subdomain `112.10.in-addr.arpa` and would answer
+  `NXDOMAIN` before kresd even asks upstream -- including for `gw05.ffhh`.
+  The zone is attached to kresd's rules DB with
+  `policy.rule_forward_add(..., {auth = true, dnssec = false})`, not with
+  `policy.FORWARD`, for the same reason. Addresses without a static record
+  are synthesized locally (see the next sections), so no address in the mesh
+  `/16` answers `NXDOMAIN` anymore.
+- **Only ordinals 1-3 have gateway names.** Upstream, `2a03:2267:R::10/::20/::30`
+  resolve to `gwNN-new.<region>.hamburg.freifunk.net` and every region's `::1`
+  to `knoten.ffhh`; everything else answers the hex client pattern
+  `ipv6-<16 nibbles>.<region>.clients.hamburg.freifunk.net`. The served
+  regions' /64 reverse zones are local zones in PowerDNS (see the next
+  section): those static names come from the inventory and every other
+  address answers the same hex client pattern, synthesized.
 
-Case sensitivity: `NO_0X20` is applied only to the IPv6 mesh reverse zone.
-Queries for the `ffhh` zone are forwarded as-is, and the community DNS answers
-them case-insensitively (verified: `NODE.FFHH` returns the same CNAME as
-`node.ffhh`). That is an upstream property, not something kresd guarantees;
-if the upstream backend or its forwarding path changes, `ffhh` names could
-break the same way the reverse zone did.
+Case sensitivity: `NO_0X20` is applied to the parts of the reverse zones that
+are still forwarded upstream. Queries for `ffhh` are forwarded to the local
+PowerDNS unmodified (or upstream when `ffhh_dns_enabled` is off); the community
+DNS answers them case-insensitively (verified: `NODE.FFHH` returns the same
+CNAME as `node.ffhh`). That is an upstream property, not something kresd
+guarantees; if the upstream backend or its forwarding path changes, `ffhh`
+names could break the same way the reverse zone did.
 
 
-### IPv4 client PTR synthesis (opt-in)
+### Local mesh DNS: PowerDNS with a Lua backend (`roles/powerdns`)
 
-Kea knows every currently leased v4 address, so the gateway can answer those
-PTRs locally instead of forwarding them upstream:
+The resolution chain is drawn as figure 5 in [topology.md](topology.md); this
+section describes the server side of it.
 
-```
-dig -x 10.112.193.10 @127.0.0.1
-10.193.112.10.in-addr.arpa. 3600 IN PTR ipv4-0a70c10a.nowe.clients.hamburg.freifunk.net.
-```
+| Zone | Served by | Content |
+|---|---|---|
+| `ffhh` | transferred + synthesis | community A/AAAA/CNAME; `<4 hex>.<region>.ffhh` synthesized |
+| `112.10.in-addr.arpa` | transferred + synthesis | community PTRs; `<4 hex>.<region>.ffhh` synthesized |
+| `<reversed /64>.ip6.arpa` | gateway only | static gateway names + synthesized `ipv6-...` |
+| `<region>.clients.hamburg.freifunk.net` | gateway only | synthesized `ipv6-...` + reverse lookup |
 
-The name follows the upstream IPv6 client pattern, with the 32-bit address in
-8 hex nibbles instead of the 64-bit host part in 16:
 
-```
-10.112.65.37 -> ipv4-0a704125.sued.clients.hamburg.freifunk.net.
-```
+`ffhh_dns_enabled` (default `false`, `true` on gw05) runs PowerDNS
+with the Lua2 backend (`pdns-server`, `pdns-backend-lua2`) on `127.0.0.2:53`
+-- loopback only, Knot Resolver forwards to it, so clients never reach it and
+no firewall port is needed. It is authoritative-only: no recursion and no
+forwarding are configured, so it answers its own zones and refuses the rest.
+It serves four kinds of zones (`/etc/powerdns/ffhh-synth.lua`, generated from
+`served_regions`):
 
-Mechanics:
+- `ffhh` and `112.10.in-addr.arpa` -- **transferred** from the community
+  (AXFR from srv01/dns01). Everything in them is answered verbatim
+  (A/AAAA/CNAME; CNAMEs are chained by PowerDNS), and transferred records
+  always win over synthesis.
 
-- `knot_client_ptr_enabled` (default `false`) enables the feature on a gateway.
-  It is set to `true` in `inventories/host_vars/gw05.yml`.
-- `knot-client-ptr-export.service` + `knot-client-ptr.timer` copy Kea's
-  memfile lease DB (`/var/lib/kea/kea-leases4.csv`, `0640 root:_kea`) into a
-  `0640 root:knot-resolver` file under `/var/lib/knot-resolver/` every minute,
-  so the resolver can read leases without being able to write them and without
-  every local user being able to read them.
-- `client-ptr.lua` is loaded by kresd, registers a `policy.suffix` rule for
-  `112.10.in-addr.arpa` **before** the forwarding rule, and answers PTRs for
-  leases whose `expire` is still in the future. Expired leases fall through to
-  the upstream forward (NXDOMAIN), exactly as without the feature.
-- Region labels come from `served_regions` (`hhsued` -> `sued`), so the
-  name is `ipv4-<hex>.<region>.clients.hamburg.freifunk.net`.
+  The fetch machinery is `ffhh-dns-fetch.service` (oneshot, also run once
+  before the first PowerDNS start) plus `ffhh-dns-fetch.timer` (first run 1
+  min after boot, then every `ffhh_dns_fetch_interval`, default 15 min). The
+  script AXFRs `ffhh_dns_axfr_zones` from `ffhh_dns_axfr_masters` (srv01),
+  keeps a JSON cache beside the data file and replaces `ffhh_dns_data`
+  (`/var/lib/powerdns/ffhh-zones-data.lua`) atomically; a failed transfer
+  keeps the last good content. A change to the Lua script or `pdns.conf`
+  needs a pdns restart -- the zone *data* file does not (the Lua backend
+  reloads it every `ffhh_dns_reload_secs`, default 5 s).
+- Gaps in those zones are synthesized in the community hex naming:
 
-Limits and caveats:
+  ```
+  10.112.65.37   <-> 4125.sued.ffhh
+                     (host part of the /16 aggregate, 4 hex, region label)
+  ```
 
-- Only leases known to **this** gateway are answered. A client asking another
-  gateway's resolver can still get NXDOMAIN, so answers are resolver-local,
-  not network-wide. That is inherent: no gateway has a global lease view.
-- Static reservations from `update-dhcp-static` are not in the memfile lease
-  DB until used; the synthesis therefore covers dynamic leases only.
-- The feature reveals lease presence to anyone allowed by the resolver ACL.
-  Keep it off unless that is an accepted policy decision.
+- one local zone per served region /64 (`<reversed>.ip6.arpa`) -- static
+  names generated from the inventory (`::1` -> `knoten.ffhh`,
+  `::10/::20/::30` -> `gwNN-new.<region>.hamburg.freifunk.net`, ordinals
+  1-3 exist upstream) plus synthesis for the rest of the region. The /64
+  reverse zones are delegated to srv03, which refuses AXFR, so they cannot
+  be transferred; if the community renames a gateway name, the inventory
+  list must be updated.
+- one zone per served region `<label>.clients.hamburg.freifunk.net` --
+  synthesis of the IPv6 client names:
+
+  ```
+  2a03:2267:1::5 <-> ipv6-0000000000000005.sued.clients.hamburg.freifunk.net
+                     (interface part, 16 hex digits)
+  ```
+
+Forward synthesis accepts only names whose hex decodes back into the region
+it is queried in (a `...sued...` name never answers for a west address),
+and transferred records always win over synthesis.
+
+### Authority over the reverse zones (`ffhh_dns_authoritative*`)
+
+`ffhh_dns_authoritative_v4` and `ffhh_dns_authoritative_v6` (defaults derive
+from `ffhh_dns_authoritative: true`; gw05 sets both explicitly) decide
+whether the gateway is authoritative for the mesh reverse zones:
+
+- **true** -- the Lua backend claims the zone (`dns_get_domaininfo` returns
+  `kind = NATIVE`, so PowerDNS answers with the AA bit and its own SOA/NS) and
+  kresd queries the local server as an authoritative one
+  (`rule_forward_add(..., {auth = true})`). No DNSSEC validation, no
+  recursion. This is what gw05 runs for both families.
+  The AA bit is on PowerDNS' reply: kresd still answers the client as a
+  resolver (`qr rd ra`), so a client-side check must query
+  `127.0.0.2` directly to observe the authority claim.
+- **false** -- the zone is not claimed at all: `dns_lookup`/`dns_list` return
+  nothing for it, `zone_set()` omits it, and kresd forwards that reverse zone
+  to the community DNS instead. Useful for a host where the community should
+  keep answering the reverse space.
+
+The two flags are independent, so a host can be authoritative for v4 reverse
+and not v6, or the other way round. `ffhh` and the `<region>.clients...`
+forward zones are not affected: they are served whenever
+`ffhh_dns_enabled` is on.
+
+This replaces the earlier `roles/knotd` (authoritative Knot DNS +
+`mod-synthrecord`) and the lease-based `knot_client_ptr_*` feature; both are
+removed, and the powerdns role cleans their leftovers off hosts that had
+them (`knot` package purged, client-ptr units and files removed).
+
+kresd rules (`roles/knot/templates/kresd.conf.j2`):
+
+- v4 reverse: `policy.rule_forward_add('112.10.in-addr.arpa', {auth = true,
+  dnssec = false}, { { 127.0.0.2 } })` -- bypasses the RFC 6303 empty zone;
+- v6 reverse: the same `rule_forward_add(..., {auth = true, dnssec = false})`
+  for each served region /64, registered **before** the /32 forward to the
+  community DNS, so regions this gateway does not serve still go upstream
+  (with `NO_0X20`, which the case-sensitive upstream backend needs and the
+  local one does not);
+- clients zones: `policy.FORWARD(127.0.0.2)` + `DNSSEC_INSECURE` per served
+  region. Upstream delegates `clients.hamburg.freifunk.net` to srv03, an
+  unsigned responder whose answers fail DNSSEC validation through kresd
+  (SERVFAIL), so serving these zones locally costs nothing that worked
+  before;
+- `ffhh`: forwarded to the local PowerDNS (transferred content + hex
+  synthesis). The view rules (knoten/node/router per region) are registered
+  before that forward, so the per-region answers keep winning.
+
+Consequences to be aware of:
+
+- ffhh answers are as fresh as the last transfer (`ffhh_dns_fetch_interval`)
+  plus kresd's caching; between transfers upstream changes are not visible
+  locally. A gateway that has never transferred anything (fresh install with
+  the community down) answers only synthesized names until the first
+  successful fetch.
+- Inside the mesh, the region clients zones answer authoritatively (hex
+  synthesis + SOA); names outside the served regions keep resolving upstream
+  wherever that worked.
+- Synthesized PTRs reveal address->name mapping for the whole mesh ranges to
+  anyone the resolver ACL admits (this was accepted for gw05 when the
+  lease-based feature was enabled; the synthesis covers more addresses).
+- kresd caches negative answers, so synthesis changes need a resolver
+  restart; the role's "Flush resolver negative cache" handler does it (the
+  cache lives on tmpfs).
 
 ### Verification
 
-`roles/knot` checks two things after start:
+`roles/knot` checks after start (the node probe guards unit/port):
 
-- `gw2`'s primary-region gateway PTR (via `knot_rev_probe_addr`), with one
+- `node.ffhh AAAA` answers on `127.0.0.1` at all;
+- the primary region's gateway PTR (via `knot_rev_probe_addr`), with one
   cache purge and retry if it is empty;
 - one **fresh** client PTR per served region. The address is derived from the
   run time (`knot_probe_seed`, default the current epoch), so it is not in the
   cache; the assertion compares the answer with
-  `ipv6-<16 nibbles>.<region>.clients.hamburg.freifunk.net`. This is the
-  regression test for `NO_0X20`: a cached answer would mask the defect.
+  `ipv6-<16 hex>.<region>.clients.hamburg.freifunk.net` (local synthesis or
+  upstream -- both use this naming). For upstream-served regions this is the
+  regression test for `NO_0X20`: a cached answer would mask the defect;
+- with `ffhh_dns_enabled`, the static `gw05.ffhh`-style IPv4 PTR through the
+  kresd rules DB, which proves the `rule_forward_add` path to PowerDNS.
+
+`roles/powerdns` additionally verifies (against `127.0.0.2`): the static and
+synthesized PTRs and the round-trip A/AAAA of the synthesized names for each
+family it is authoritative for, and -- for every family -- the reply's status:
+`aa` when the zone is claimed (`NATIVE`), `REFUSED` when the flag is off.
+That is what distinguishes "the parameter works" from "the zone silently
+falls through".
 
 `playbooks/gateway-reverse-check.yml` + `tools/reverse-dns-check.py` run the
 same checks standalone, plus informational probes:
 
 ```sh
 ansible-playbook playbooks/gateway-reverse-check.yml
-# per region: gw01/02/03 PTRs (must pass), a fresh client PTR (must pass),
-# the gateway's own address and one IPv4 client address (informational)
+# per region: gw01/02/03 PTRs (must pass), a fresh client PTR plus its
+# forward record (must pass), the gateway's own address (informational)
 ```
 
 ### Policy callback signature

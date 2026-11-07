@@ -6,11 +6,15 @@ Checks, per served region:
   gateway PTRs   the gw01/gw02/gw03 addresses of the region must resolve to
                  gwNN-new.<region>.hamburg.freifunk.net.
   client PTR     one address that is (almost) certainly not in the resolver
-                 cache must resolve to
-                 ipv6-<16 nibbles>.<region>.clients.hamburg.freifunk.net.
-                 The address is derived from the current time, so the check is
-                 a real regression test for the 0x20 case-randomisation defect
-                 (a cached answer would mask it).
+                 cache must resolve to the synthesized community name
+                 ipv6-<16 hex interface part>.<region>.clients.hamburg
+                 .freifunk.net (roles/powerdns answers the served regions,
+                 the community DNS the rest; both use this naming).
+                 The address is derived from the current time, so the check
+                 is a real regression test, not a cache hit.
+
+  forward record the synthesized name must resolve back to the address
+                 (A / AAAA through the same resolver).
 
 Informational probes (never fail the run):
 
@@ -18,9 +22,9 @@ Informational probes (never fail the run):
                   naming for ordinals 1-3 is gwNN-new.<region>...; ordinals
                   that are not community gateways fall back to the client
                   naming pattern.
-  v4 client       a client address in the region's IPv4 subnet. The community
-                  DNS has no PTR records for client IPv4 addresses (same as
-                  the legacy unbound gateway), so this is reported as NXDOMAIN.
+  v4 client       a client address in the region's IPv4 subnet: answered by
+                  roles/powerdns as <4 hex host part>.<region>.ffhh (the
+                  host part inside the mesh /16, in the ffhh zone).
 
 Examples:
   sudo ./reverse-dns-check.py \\
@@ -73,8 +77,30 @@ def dig_reverse(addr, server, port, timeout=5):
     return rcode, out, ""
 
 
+def dig_forward(name, rdtype, server, port, timeout=5):
+    """Return the first rdata of an A/AAAA query for `name`, or ''."""
+    cmd = [
+        "dig", "+short", "+time=" + str(timeout), "+tries=1",
+        rdtype, name, "@" + server, "-p", str(port),
+    ]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 6)
+    except Exception:  # noqa: BLE001
+        return ""
+    lines = [ln.strip() for ln in p.stdout.splitlines() if ln.strip()]
+    return lines[0] if lines else ""
+
+
 def norm(name):
     return name.strip().lower().rstrip(".")
+
+
+def ip_equal(a, b):
+    """Compare two IP texts canonically (both may or may not use ::)."""
+    try:
+        return ipaddress.ip_address(a) == ipaddress.ip_address(b)
+    except ValueError:
+        return norm(a) == norm(b)
 
 
 class Result:
@@ -172,12 +198,23 @@ def main():
             results.append(check(Result("gateway", label, addr, expected, None, None),
                                  args.server, args.port))
 
-        # Fresh client address: derived from the run time so it is not cached.
+        # Fresh client address: derived from the run time so it is not
+        # cached.  Synthesized by roles/powerdns (and upstream) as the
+        # 16-hex interface part under the region clients domain.
         offset = 0x100000 + (seed % 0xFFFF) + index * 0x1000
         addr = str(net.network_address + offset)
-        expected = "ipv6-%016x.%s.clients.hamburg.freifunk.net." % (offset, label)
-        results.append(check(Result("client", label, addr, expected, None, None),
-                             args.server, args.port))
+        expected = "ipv6-%016x.%s.clients.hamburg.freifunk.net." % (
+            int(ipaddress.ip_address(addr)) & ((1 << 64) - 1), label)
+        res = check(Result("client", label, addr, expected, None, None),
+                    args.server, args.port)
+        results.append(res)
+        if res.state == PASS:
+            # The synthesized name must resolve back to the address.
+            back = dig_forward(norm(expected), "AAAA", args.server, args.port)
+            if not back or not ip_equal(back, addr):
+                res.state = FAIL
+                res.actual = "%s but %s -> %r" % (res.actual, norm(expected),
+                                                  back or "no AAAA")
 
         if args.gateway_index is not None:
             own = str(net.network_address + args.gateway_index * 0x10)
@@ -189,13 +226,22 @@ def main():
             results.append(info(Result("own", label, own, expected, None, None),
                                 args.server, args.port))
 
-        # IPv4 client addresses have no PTR records upstream; informational
-        # only, so a deliberate NXDOMAIN does not fail the run.
+        # IPv4 client address: roles/powerdns synthesizes the host part of
+        # the /16 aggregate as 4 hex digits; check the round trip too.
         if v4net:
             net4 = ipaddress.ip_network(v4net, strict=False)
             addr4 = str(net4.network_address + 0x100 + (seed % 512))
-            results.append(info(Result("v4-client", label, addr4, None, None, None),
-                                args.server, args.port))
+            ia4 = ipaddress.ip_address(addr4)
+            expected4 = "%04x.%s.ffhh." % (int(ia4) & 0xFFFF, label)
+            res4 = check(Result("v4-client", label, addr4, expected4, None, None),
+                         args.server, args.port)
+            if res4.state == PASS:
+                back = dig_forward(norm(expected4), "A", args.server, args.port)
+                if not back or not ip_equal(back, addr4):
+                    res4.state = FAIL
+                    res4.actual = "%s but %s -> %r" % (
+                        res4.actual, norm(expected4), back or "no A")
+            results.append(res4)
 
     for spec in args.check:
         if "=" not in spec:

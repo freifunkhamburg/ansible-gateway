@@ -1,0 +1,304 @@
+-- ffhh mesh DNS for PowerDNS authoritative (Lua2 API v2).
+-- Managed by ansible (roles/powerdns) -- do not edit on the host.
+--
+-- Serves three kinds of zones:
+--
+-- 1. Transferred community zones (data file written by ffhh-dns-fetch,
+--    reloaded when it changes): the ffhh forward zone and the mesh IPv4
+--    reverse zone.  Everything in them is answered verbatim; CNAMEs are
+--    returned and chained by PowerDNS.
+--
+-- 2. The same zones' gaps are synthesized in the community hex naming:
+--      10.112.65.37    -> 4125.sued.ffhh.        (host part of the /16,
+--                                                 4 hex, under the region label)
+--      4125.sued.ffhh  -> A 10.112.65.37
+--    Records transferred from upstream always win.
+--
+-- 3. Per served region (not transferable upstream -- srv03 refuses AXFR):
+--    the /64 reverse zone (static gateway names from the inventory plus
+--    synthesis) and the <region>.clients.hamburg.freifunk.net forward zone:
+--      2a03:2267:1::5  -> ipv6-0000000000000005.sued.clients.hamburg.freifunk.net.
+--      ipv6-...sued.clients... -> AAAA 2a03:2267:1::5
+
+local SOA_NS = "{{ ffhh_dns_soa_ns }}"
+local SOA_HM = "{{ ffhh_dns_soa_hostmaster }}"
+local SOA_SERIAL = {{ ffhh_dns_soa_serial }}
+local SOA_ARGS = "86400 7200 3600000 172800"
+local TTL_SYNTH = {{ ffhh_dns_ttl }}
+local TTL_STATIC = 3600
+
+local DATA_FILE = "{{ ffhh_dns_data }}"
+local RELOAD_SECS = {{ ffhh_dns_reload_secs }}
+
+-- Regions served by this gateway (from the inventory).
+local REGIONS = {
+{% for r in served_regions %}
+  { label = "{{ r.id | regex_replace('^hh', '') }}", o3 = {{ (r.v4_net | addr_only).split('.')[2] }},
+    v6 = "{{ r.v6_prefix | addr_only | regex_replace('::$', '') }}",
+    rev = "{{ r.v6_prefix | reverse_zone }}." },
+{% endfor %}
+}
+
+local V4_REV = "{{ mesh_reverse_v4 }}."
+local FFHH = "ffhh."
+local FFHH_HEX_A_TTL = {{ ffhh_dns_ttl }}
+
+-- Authority over the mesh reverse zones (roles/powerdns defaults).
+-- A disabled family is not claimed as a zone at all: PowerDNS answers
+-- REFUSED for it and kresd forwards it upstream instead.
+local AUTH_V4 = {{ 'true' if ffhh_dns_authoritative_v4 | bool else 'false' }}
+local AUTH_V6 = {{ 'true' if ffhh_dns_authoritative_v6 | bool else 'false' }}
+
+-- Transferred zone data --------------------------------------------------
+
+local data = {}
+local last_load = 0
+
+local function load_data()
+  local now = os.time()
+  if now - last_load < RELOAD_SECS then return end
+  last_load = now
+  local chunk = loadfile(DATA_FILE)
+  if chunk == nil then return end
+  local ok, zones = pcall(chunk)
+  if ok and type(zones) == "table" then data = zones end
+end
+
+-- Static v6 PTRs per region, keyed by the 16-hex interface part.
+local V6_STATIC = {}
+for _, r in ipairs(REGIONS) do
+  V6_STATIC[r.rev] = {
+    ["0000000000000001"] = "knoten.ffhh.",
+{% for n in ffhh_dns_v6_gateway_ordinals %}
+    ["{{ '%016x' | format(n * 16) }}"] = "gw{{ '%02d' | format(n) }}-new." .. r.label .. ".hamburg.freifunk.net.",
+{% endfor %}
+  }
+end
+
+local function soa(zone)
+  return { name = zone, type = "SOA",
+           content = SOA_NS .. " " .. SOA_HM .. " " .. SOA_SERIAL .. " " .. SOA_ARGS,
+           ttl = TTL_STATIC }
+end
+
+local function ns(zone)
+  return { name = zone, type = "NS", content = SOA_NS, ttl = TTL_STATIC }
+end
+
+local function ends(name, suffix)
+  return name:sub(-#suffix) == suffix
+end
+
+local function region_by_o3(o3)
+  for _, r in ipairs(REGIONS) do
+    if o3 >= r.o3 and o3 < r.o3 + 32 then return r end
+  end
+  return nil
+end
+
+local function region_by_label(label)
+  for _, r in ipairs(REGIONS) do
+    if r.label == label then return r end
+  end
+  return nil
+end
+
+local function client_domain(label)
+  return label .. ".{{ ffhh_dns_clients_domain }}."
+end
+
+-- Is this a zone we claim?  Reverse zones follow the authority flags.
+local function zone_enabled(zone)
+  if zone == V4_REV then return AUTH_V4 end
+  for _, r in ipairs(REGIONS) do
+    if zone == r.rev then return AUTH_V6 end
+  end
+  return true
+end
+
+-- Transferred zone lookup: longest suffix match, exact name.
+local function transferred(name)
+  local best, best_len = nil, -1
+  for zone in pairs(data) do
+    if #zone > best_len and ends(name, zone) then
+      best, best_len = zone, #zone
+    end
+  end
+  if best == nil then return nil end
+  return best, data[best].recs[name]
+end
+
+function dns_lookup(qtype, qname, domain_id, ctx)
+  load_data()
+  local name = qname:toString():lower()
+  local t = qtype:getName()
+  local res = {}
+
+  -- ---------- 1. transferred content wins ----------
+  local zone, recs = transferred(name)
+  if zone ~= nil and not zone_enabled(zone) then
+    zone, recs = nil, nil
+  end
+  if zone ~= nil then
+    if recs ~= nil then
+      local cname
+      for _, row in ipairs(recs) do
+        if t == "ANY" or row[1] == t then
+          res[#res+1] = { name = name, type = row[1], content = row[2], ttl = row[3] }
+        elseif row[1] == "CNAME" then
+          cname = row
+        end
+      end
+      if #res == 0 and cname ~= nil and t ~= "CNAME" and t ~= "SOA" then
+        -- let PowerDNS follow the alias (node.ffhh -> knoten.ffhh)
+        res[#res+1] = { name = name, type = "CNAME", content = cname[2], ttl = cname[3] }
+      end
+      return res   -- also NODATA for names inside the zone
+    end
+    if name == zone then
+      if t == "SOA" or t == "ANY" then res[#res+1] = soa(zone) end
+      return res
+    end
+    if ends(name, zone) and name ~= zone then
+      -- name inside a transferred zone but not present: fall through to
+      -- the synthesis below (only ffhh and the v4 reverse zone have it),
+      -- everything else is a plain NXDOMAIN.
+      if zone ~= FFHH and zone ~= V4_REV then return res end
+    end
+  end
+
+  -- ---------- 2. IPv4 reverse synthesis (into the ffhh zone) ----------
+  if AUTH_V4 and ends(name, V4_REV) then
+    if name == V4_REV then
+      if t == "SOA" or t == "ANY" then res[#res+1] = soa(V4_REV) end
+      return res
+    end
+    if t == "PTR" or t == "ANY" then
+      local o4, o3 = name:match("^([^%.]+)%.([^%.]+)%.")
+      if o3 and o4 then
+        local o3n, o4n = tonumber(o3), tonumber(o4)
+        local r = o3n and region_by_o3(o3n)
+        if r then
+          res[#res+1] = { name = name, type = "PTR", ttl = TTL_SYNTH,
+            content = string.format("%04x.%s.ffhh.", o3n * 256 + o4n, r.label) }
+        end
+      end
+    end
+    return res
+  end
+
+  -- ---------- 2b. ffhh forward synthesis (HEX.<region>.ffhh -> A) ------
+  if ends(name, FFHH) then
+    if name == FFHH then
+      if t == "SOA" or t == "ANY" then res[#res+1] = soa(FFHH) end
+      return res
+    end
+    local h, label = name:match("^([0-9a-f][0-9a-f][0-9a-f][0-9a-f])%.([a-z]+)%.ffhh%.$")
+    if h and (t == "A" or t == "ANY") then
+      local r = region_by_label(label)
+      if r then
+        local n = tonumber(h, 16)
+        local o3 = math.floor(n / 256)
+        if region_by_o3(o3) == r then
+          res[#res+1] = { name = name, type = "A", ttl = FFHH_HEX_A_TTL,
+            content = "10.112." .. o3 .. "." .. (n % 256) }
+        end
+      end
+    end
+    return res
+  end
+
+  for _, r in ipairs(REGIONS) do
+    -- ---------- 3a. v6 reverse zone ----------
+    if AUTH_V6 and ends(name, r.rev) then
+      if name == r.rev then
+        if t == "SOA" or t == "ANY" then res[#res+1] = soa(r.rev) end
+        return res
+      end
+      if t == "PTR" or t == "ANY" then
+        local host = name:sub(1, #name - #r.rev - 1)   -- nibble labels
+        local h = (host:gsub("%.", ""))
+        if #h == 16 then
+          local hex16 = h:reverse()
+          local stat = (V6_STATIC[r.rev] or {})[hex16]
+          if stat then
+            res[#res+1] = { name = name, type = "PTR", content = stat, ttl = TTL_STATIC }
+          else
+            res[#res+1] = { name = name, type = "PTR", ttl = TTL_SYNTH,
+              content = "ipv6-" .. hex16 .. "." .. client_domain(r.label) }
+          end
+        end
+      end
+      return res
+    end
+
+    -- ---------- 3b. clients forward zone ----------
+    local cd = client_domain(r.label)
+    if ends(name, cd) then
+      if name == cd then
+        if t == "SOA" or t == "ANY" then res[#res+1] = soa(cd) end
+        return res
+      end
+      local h = name:match("^ipv6%-([0-9a-f]+)%." .. cd:gsub("%.", "%%.") .. "$")
+      if h and (t == "AAAA" or t == "ANY") and #h == 16 then
+        res[#res+1] = { name = name, type = "AAAA", ttl = TTL_SYNTH,
+          content = r.v6 .. ":0:" .. h:sub(1,4) .. ":" .. h:sub(5,8) ..
+                    ":" .. h:sub(9,12) .. ":" .. h:sub(13,16) }
+      end
+      return res
+    end
+  end
+
+  return res
+end
+
+-- Zone discovery for PowerDNS ------------------------------------------
+
+local function zone_set()
+  local z = { [FFHH] = true }
+  if AUTH_V4 then z[V4_REV] = true end
+  for zone in pairs(data) do
+    if zone_enabled(zone) then z[zone] = true end
+  end
+  for _, r in ipairs(REGIONS) do
+    if AUTH_V6 then z[r.rev] = true end
+    z[client_domain(r.label)] = true
+  end
+  return z
+end
+
+function dns_get_domaininfo(domain)
+  local d = domain:toString():lower()
+  if data[d] ~= nil then
+    return { kind = "NATIVE", serial = data[d].serial }
+  end
+  if zone_set()[d] then
+    return { kind = "NATIVE", serial = SOA_SERIAL }
+  end
+  return false
+end
+
+function dns_list(target, domain_id)
+  local d = target:toString():lower()
+  if data[d] ~= nil then
+    local out = {}
+    for name, recs in pairs(data[d].recs) do
+      for _, row in ipairs(recs) do
+        out[#out+1] = { name = name, type = row[1], content = row[2], ttl = row[3] }
+      end
+    end
+    return out
+  end
+  if not zone_set()[d] then return false end
+  local out = { soa(d), ns(d) }
+  local st = V6_STATIC[d]
+  if st then
+    for hex16, target_name in pairs(st) do
+      local owner = ""
+      for i = 16, 1, -1 do owner = owner .. hex16:sub(i, i) .. "." end
+      out[#out+1] = { name = owner .. d, type = "PTR",
+                      content = target_name, ttl = TTL_STATIC }
+    end
+  end
+  return out
+end

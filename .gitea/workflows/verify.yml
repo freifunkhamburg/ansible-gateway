@@ -45,6 +45,29 @@ jobs:
               print("\n".join(bad)); sys.exit(1)
           print("inventory files OK")
           PY
+      - name: Documentation fences and links
+        run: |
+          set -eu
+          python3 - <<'PY'
+          import glob, os, re, sys
+          bad = []
+          files = [f for f in glob.glob('**/*.md', recursive=True)
+                   if not any(p.startswith('.') for p in f.split(os.sep))]
+          for f in files:
+              s = open(f, encoding='utf-8').read()
+              if s.count('```') % 2:
+                  bad.append(f"{f}: unbalanced code fences")
+              for target in re.findall(r'\]\(([^)#]+)', s):
+                  if target.startswith(('http://', 'https://', 'mailto:')):
+                      continue
+                  full = os.path.normpath(os.path.join(os.path.dirname(f), target))
+                  if not os.path.exists(full):
+                      bad.append(f"{f}: broken link {target}")
+          if bad:
+              print("\n".join(bad)); sys.exit(1)
+          print(f"docs OK ({len(files)} files)")
+          PY
+
       - name: No secrets committed (fail closed)
         run: |
           set -eu

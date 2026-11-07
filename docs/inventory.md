@@ -1,14 +1,17 @@
 # Inventory model and review decisions
 
-The inventory stores inputs only. This file documents what each variable is
-for, what was removed, and which values are derived.
+The inventory stores inputs only. This file documents the model and the
+decisions behind it — what each tier holds, what was removed, and which values
+are derived — rather than enumerating every field; the role reference is in
+[roles.md](roles.md) and the field-level facts are in the inventory files
+themselves.
 
 ## Tiers
 
 | Tier | File | Holds |
 | --- | --- | --- |
-| Shared mesh | `group_vars/all/main.yml` | gateway registry, aggregates, AS, releases, forward-host list, NTP upstreams, Kea NTP options, paths |
-| Gateway | `host_vars/<gw>.yml` | ordinal, served regions, address plan, pools, allowlist, admin keys, NIC MACs |
+| Shared mesh | `group_vars/all/main.yml` | gateway registry, aggregates, AS, releases, forward-host list, NTP upstreams, Kea NTP options, resolver defaults/paths |
+| Gateway | `host_vars/<gw>.yml` | ordinal, served regions, address plan, pools, allowlist, admin keys, NIC MACs, resolver flags |
 | Region | `region_vars/<region>.yml` | subnet, prefix, numbering, tunnel ports, Kea block, Gluon domain, NBMA neighbours |
 
 Rule: if a second gateway would repeat the same value, it is shared or a
@@ -84,6 +87,14 @@ per-host list.
 ### `mesh_announce_remove_legacy` — removed
 A fresh Debian 13 host has no older respondd units or old checkout. The role
 only configures and starts the new service.
+
+### `ffhh_dns_enabled` / `ffhh_dns_authoritative_v4|_v6` — gateway identity
+These stay per host because they decide whether this gateway serves the mesh
+DNS locally and which reverse families it claims. The shared defaults live in
+`roles/powerdns/defaults/main.yml` (both families derived from
+`ffhh_dns_authoritative`); a host sets them only when it must differ. Adding
+more per-host resolver data (peers, zones) would repeat registry facts and is
+deliberately avoided.
 
 ## group_vars decisions
 
@@ -161,11 +172,13 @@ gw_expect_batman_version
 gw_expect_fastd_instances
 mesh_announce_domains
 ospf_v4_networks
+kea_subnet4
+kea_dhcp6_interfaces
 ```
 
 ## Playbook model
 
-The numbered the numbered step playbooks were build-out scaffolding, not a
+The numbered step playbooks were build-out scaffolding, not a
 production state machine. In production the host is brought to the final state
 in one ordered run; splitting the run would leave intermediate states that are
 not valid (e.g. Kea with no DHCP-static checkout, firewall before services).

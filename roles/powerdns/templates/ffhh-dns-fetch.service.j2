@@ -1,0 +1,8 @@
+[Unit]
+Description=Transfer the community ffhh DNS zones for the local PowerDNS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/bin/ffhh-dns-fetch

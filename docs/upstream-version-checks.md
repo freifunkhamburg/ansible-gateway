@@ -35,7 +35,7 @@ the older alternative). `roles/bird` installs `bird3`, so it is
 covered by apt and is not in the checker catalog.
 
 **LTS series.** Some upstreams publish deliberate LTS lines. Kea's LTS is
-**3.0.x** (current stable LTS 3.0.5 on isc.org/kea); ISC also ships newer
+**3.0.x** (3.0.5 at the last check on isc.org/kea); ISC also ships newer
 non-LTS releases (3.1.x/3.2.x/3.3.x). Comparing a deliberate LTS pin with
 "newest tag overall" reports the pin as outdated, so the catalog supports
 `policy: lts` with an `lts_tag_regex`. Knot Resolver has no upstream LTS

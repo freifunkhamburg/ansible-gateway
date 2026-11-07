@@ -50,18 +50,24 @@ gw_kea_pools:
   hhnowe: "10.112.193.0-10.112.199.254"
   hhost: "10.112.225.0-10.112.231.254"
 
-# --- resolver: IPv4 client PTR synthesis -------------------------------
-# Enabled on gw05 by decision: leased v4 addresses answer PTR as
-# ipv4-<8 hex>.<region>.clients.hamburg.freifunk.net instead of NXDOMAIN.
-# See docs/knot-resolver.md for the exposure caveat. Kept off for other
-# gateways until the same decision is made there.
-knot_client_ptr_enabled: true
+# --- resolver: local mesh DNS (roles/powerdns) --------------------------
+# Authoritative loopback DNS for this gateway: serves the ffhh and mesh
+# reverse zones transferred from the community (srv01) plus the
+# <region>.clients.hamburg.freifunk.net zones, synthesizing the community
+# hex naming where the zones have no record (client addresses answer
+# <4 hex>.<region>.ffhh / ipv6-<16 hex>.<region>.clients.hamburg...).
+# Without it, kresd's RFC 6303 empty zone 10.in-addr.arpa swallows
+# 112.10.in-addr.arpa and even gw05.ffhh is NXDOMAIN.
+# See docs/knot-resolver.md for the exposure caveat of synthesized client
+# PTRs; enabled on gw05 by decision.
+ffhh_dns_enabled: true
 
-# Authoritative reverse DNS on this gateway (roles/knotd): Knot Resolver
-# serves the IPv4 reverse zone from a local Knot DNS instance transferred
-# from the community DNS. Without this, kresd's RFC 6303 empty zone
-# 10.in-addr.arpa swallows 112.10.in-addr.arpa and even gw05.ffhh is NXDOMAIN.
-knotd_enabled: true
+# gw05 is authoritative for both mesh reverse families: the Lua backend
+# claims 112.10.in-addr.arpa and each served region's /64 reverse zone, and
+# kresd queries it as an authoritative server ({auth = true}) rather than
+# forwarding those zones to the community DNS.
+ffhh_dns_authoritative_v4: true
+ffhh_dns_authoritative_v6: true
 
 # Additional DHCPv6 resolver advertised beside this gateway's own primary
 # region address.

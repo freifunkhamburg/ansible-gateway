@@ -155,16 +155,29 @@ for _, r in ipairs(regions) do
     end
 end
 
-{% if knot_client_ptr_enabled %}
--- ---------- IPv4 client PTRs from Kea leases (opt-in) ------------------
--- Registered BEFORE the reverse-zone forwarding rule so local answers win.
--- See roles/knot/templates/client-ptr.lua.j2 and docs/knot-resolver.md.
-dofile('{{ knot_client_ptr_lua }}')
-
-{% endif %}
 -- ---------- ffhh zones ------------------------------------------------
 policy.add(policy.suffix(policy.FLAGS({'DNSSEC_INSECURE'}), {todname('ffhh')}))
+{% if ffhh_dns_enabled %}
+-- ffhh is answered locally by roles/powerdns: the transferred community
+-- content plus the synthesized HEX.<region>.ffhh A records (PTR targets
+-- for IPv4 clients).  The view rules above are registered first, so the
+-- per-region knoten/node/router answers keep winning.
+policy.add(policy.suffix(policy.FORWARD('{{ ffhh_dns_listen }}@{{ ffhh_dns_port }}'), {todname('ffhh')}))
+{% else %}
 policy.add(policy.suffix(policy.FORWARD('{{ knot_upstream_ffhh }}'), {todname('ffhh')}))
+{% endif %}
+{% if ffhh_dns_enabled %}
+-- ---------- region clients zones ---------------------------------------
+-- Upstream (srv03) serves these from an unsigned responder whose answers
+-- fail DNSSEC validation (SERVFAIL through kresd).  The local PowerDNS
+-- (roles/powerdns) answers the hex client names that its PTR synthesis
+-- produces, in both directions; marking the subtree insecure is what
+-- makes ANY of them resolve.
+{% for r in served_regions %}
+policy.add(policy.suffix(policy.FLAGS({'DNSSEC_INSECURE'}), {todname('{{ r.id | regex_replace('^hh', '') }}.{{ ffhh_dns_clients_domain }}')}))
+policy.add(policy.suffix(policy.FORWARD('{{ ffhh_dns_listen }}@{{ ffhh_dns_port }}'), {todname('{{ r.id | regex_replace('^hh', '') }}.{{ ffhh_dns_clients_domain }}')}))
+{% endfor %}
+{% endif %}
 -- The IPv6 mesh reverse zone is forwarded to the community DNS and marked
 -- insecure.  Two kresd quirks have to be neutralised here:
 --
@@ -180,12 +193,15 @@ policy.add(policy.suffix(policy.FORWARD('{{ knot_upstream_ffhh }}'), {todname('f
 --    that mixed-case name to its case-sensitive backend, which answers
 --    NXDOMAIN unless the name happens to be cached.  NO_0X20 keeps the
 --    forwarded queries all-lowercase, matching what unbound sends.
-{% if knotd_enabled %}
--- IPv4 reverse DNS is served locally by roles/knotd (authoritative Knot DNS
--- on a loopback address).  dnssec = false adds a negative trust anchor for
--- the subtree: the zone is unsigned and also lives inside kresd's RFC 6303
--- empty zone 10.in-addr.arpa, which otherwise answers NXDOMAIN first.
-policy.rule_forward_add('{{ mesh_reverse_v4 }}', {auth = true, dnssec = false}, { { '{{ knotd_listen }}' } })
+{% if ffhh_dns_enabled and (ffhh_dns_authoritative_v4 | bool) %}
+-- IPv4 reverse DNS is served locally by roles/powerdns as an authoritative
+-- zone (ffhh_dns_authoritative_v4).  {auth = true} makes kresd query it as
+-- an auth server: no DNSSEC validation, no recursion, and the AA bit from
+-- the local reply is not re-stated to the client (kresd answers as a resolver,
+-- i.e. `ra`); query 127.0.0.2 directly to see the authority claim.
+-- dnssec = false also adds a negative trust anchor for the unsigned subtree,
+-- which sits inside kresd's RFC 6303 empty zone 10.in-addr.arpa.
+policy.rule_forward_add('{{ mesh_reverse_v4 }}', {auth = true, dnssec = false}, { { '{{ ffhh_dns_listen }}' } })
 {% else %}
 {% for z in [mesh_reverse_v4] %}
 policy.add(policy.suffix(policy.FLAGS('NO_0X20'), {todname('{{ z }}')}))
@@ -193,8 +209,27 @@ policy.add(policy.suffix(policy.FLAGS({'DNSSEC_INSECURE'}), {todname('{{ z }}')}
 policy.add(policy.suffix(policy.FORWARD('{{ knot_upstream_ffhh }}'), {todname('{{ z }}')}))
 {% endfor %}
 {% endif %}
+{% if ffhh_dns_enabled and (ffhh_dns_authoritative_v6 | bool) %}
+-- The IPv6 reverse zones of the regions served here are answered by the
+-- local PowerDNS as authoritative zones (ffhh_dns_authoritative_v6:
+-- static gateway names + hex synthesis, roles/powerdns).  The {auth = true}
+-- rules make kresd query them as auth servers (no DNSSEC validation, no
+-- recursion). PowerDNS' own reply is authoritative (AA); kresd's client-facing
+-- answer is still a resolver answer.
+-- The /64 forwards are registered BEFORE the /32 forward so they win for
+-- our regions while the rest of the aggregate still goes upstream.  The
+-- flags cover the whole /32: NO_0X20 for the upstream part (see above),
+-- DNSSEC_INSECURE because both the upstream zone and the local answers
+-- are unsigned.
+policy.add(policy.suffix(policy.FLAGS({'NO_0X20', 'DNSSEC_INSECURE'}), {todname('{{ mesh_reverse_v6 }}')}))
+{% for r in served_regions %}
+policy.rule_forward_add('{{ r.v6_prefix | reverse_zone }}', {auth = true, dnssec = false}, { { '{{ ffhh_dns_listen }}' } })
+{% endfor %}
+policy.add(policy.suffix(policy.FORWARD('{{ knot_upstream_ffhh }}'), {todname('{{ mesh_reverse_v6 }}')}))
+{% else %}
 {% for z in [mesh_reverse_v6] %}
 policy.add(policy.suffix(policy.FLAGS('NO_0X20'), {todname('{{ z }}')}))
 policy.add(policy.suffix(policy.FLAGS({'DNSSEC_INSECURE'}), {todname('{{ z }}')}))
 policy.add(policy.suffix(policy.FORWARD('{{ knot_upstream_ffhh }}'), {todname('{{ z }}')}))
 {% endfor %}
+{% endif %}

@@ -9,7 +9,7 @@ interactive login. The checks are **not** run at login: a cron job rebuilds
 | path | role |
 | --- | --- |
 | `/usr/local/bin/motd-refresh` | rebuilds `/etc/motd.tail` (check output + batman health) |
-| `/etc/cron.d/check` | `*/5 * * * * root /usr/local/bin/motd-refresh` |
+| `/etc/cron.d/check` | `check-gateway` every minute, and `*/5 * * * * root /usr/local/bin/motd-refresh` to rebuild `/etc/motd.tail` |
 | `/usr/local/sbin/batman-health` | `tools/batman-health.py` (copied, `--motd` mode) |
 | `/root/check.sh`, `/root/check-sanitized.sh` | the gateway check scripts |
 | `/etc/pam.d/login`, `/etc/pam.d/sshd` | extra `pam_motd.so motd=/etc/motd.tail noupdate` line |

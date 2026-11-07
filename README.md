@@ -17,25 +17,40 @@ clients.
 
 The desired state includes:
 
-- two NICs named `intra-as` (uplink to the transit fabric) and `uplink`;
+- two physical NICs, `intra-as` (transit/peering) and `uplink` (transit),
+  plus `dummy0` holding the published SNAT addresses;
 - batman-adv/batctl built from the pinned upstream release, one bat/VXLAN
   interface per served region;
 - fastd instances derived from the region table and the gateway ordinal;
-- Kea DHCPv4/v6 with per-region subnets and per-gateway `/21` pools;
+- Kea DHCPv4/v6 with per-region subnets and a per-gateway pool range inside
+each region `/19` (the first `/24` of the slot is kept for static
+reservations);
 - BIRD OSPF/BGP/static routing;
 - Knot Resolver as the client-facing resolver (unbound stays renderable but
   de-selected);
+- PowerDNS on loopback as the authoritative server for the zones the gateway
+  owns (community zones transferred from srv01 + hex synthesis), which kresd
+  forwards to;
 - chrony as the time daemon (ntpsec stays renderable but de-selected);
 - vnstat, fail2ban, respondd from upstream `mesh-announce`, SSH hardening;
 - the netfilter ruleset, rendered and applied when it changes.
+
+## Diagrams
+
+`docs/topology.md` holds the figures and is the place to start when reading
+this repository: software components, Linux interfaces and addressing, the
+client-to-Internet packet path (including NAT and policy routing), the
+inter-gateway VXLAN fabric, and the DNS resolution chain. They are Mermaid
+blocks, so they render in Gitea and stay plain text in a diff.
 
 ## One run, not a step sequence
 
 `playbooks/gateway.yml` is the production entry point. It brings a fresh
 Debian 13 host to the full configured state in a single idempotent run; role
-order encodes the dependencies (network → mesh → data → Kea → BIRD → services
-→ fastd → SSH → operations → respondd → firewall). The old per-step playbooks
-were build-out scaffolding and are gone.
+order encodes the dependencies (network → mesh → data → Kea → BIRD →
+services → PowerDNS → kresd → fastd → SSH → operations → respondd →
+firewall). The old per-step playbooks were build-out scaffolding and are
+gone.
 
 ```sh
 ansible-playbook playbooks/gateway.yml --check --diff
@@ -83,22 +98,41 @@ reference host. See `docs/inventory.md` for the variable-by-variable model.
 ## Layout
 
 ```
-ffhh-gw-ansible/
+ansible-gateway/
   README.md  AGENTS.md  ansible.cfg
   playbooks/
-    gateway.yml               full production run
-    gateway-fastd.yml         secrets-enabled fastd run
+    gateway.yml                full production run
+    gateway-fastd.yml          secrets-enabled fastd run
     gateway-check-upstreams.yml
     gateway-client-check.yml
+    gateway-reverse-check.yml
     gateway-knot-test.yml
   roles/
     base  regions  network  mesh  batman_build  data_sync
-    kea  bird  services  knot  knot_build  knot_test
+    kea  bird  services  powerdns  knot  knot_build  knot_test
     fastd  ssh  operations  mesh_announce  firewall
-  inventories/                see above
-  docs/                       architecture and operational notes
-  tools/                      checkers used by the playbooks
+  inventories/                 see above
+  docs/                        architecture and operational notes
+  tools/                       checkers used by the playbooks
 ```
 
 The automation downloads upstream source and data **on the target**, so the
 target's own network is used.
+
+## Documentation map
+
+| Document | Covers |
+|---|---|
+| `docs/roles.md` | role-by-role reference: what each role owns, its inputs, gating |
+| `docs/topology.md` | figures: components, interfaces, packet paths, DNS chain |
+| `docs/architecture.md` | runtime model, role order, addressing, backends |
+| `docs/inventory.md` | inventory model: tiers, removed variables, derived values |
+| `docs/knot-resolver.md` | kresd build, policy rules, local PowerDNS DNS |
+| `docs/fastd.md` | tunnel numbering, keys, MTU, packet mark |
+| `docs/ntp.md`, `docs/ntpsec-vs-chrony.md` | time daemon choice |
+| `docs/client-check.md` | client-view verification |
+| `docs/batman-health.md` | batman-adv health records |
+| `docs/respondd.md` | mesh-announce/respondd domains |
+| `docs/motd.md` | operator-facing login banner |
+| `docs/upstream-version-checks.md` | component-vs-upstream drift |
+| `docs/knot-resolver-test.md` | comparison instance |

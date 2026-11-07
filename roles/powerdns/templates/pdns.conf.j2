@@ -1,0 +1,14 @@
+# Managed by ansible (roles/powerdns) -- do not edit on the host.
+launch=lua2
+lua2-filename={{ ffhh_dns_lua }}
+local-address={{ ffhh_dns_listen }}
+local-port={{ ffhh_dns_port }}
+version-string=internal
+# Authoritative only: no recursion and no forwarding are configured, so the
+# server answers its own zones and refuses everything else.  There is no
+# validation to disable (PowerDNS 4 removed the old `dnssec` setting); none of
+# these zones is signed, so every answer is unsigned by construction.
+disable-axfr=yes
+socket-dir=/run/pdns
+# The zone list is static and comes from the Lua script; no cache needed.
+zone-cache-refresh-interval=0

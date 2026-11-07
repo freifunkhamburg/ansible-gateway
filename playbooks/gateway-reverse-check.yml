@@ -4,14 +4,14 @@
 # Verifies, per served region, that the client-facing resolver answers:
 #   - the community gateway PTRs (gw01/gw02/gw03 addresses);
 #   - a fresh (uncached) IPv6 client PTR.
-# Both come from the community DNS upstream, not from local data. The fresh
-# client probe is the regression test for the 0x20 case-randomisation defect
-# (kresd sends a mixed-case QNAME upstream, which the case-sensitive backend
-# answers with NXDOMAIN unless the name happens to be cached).
+# Both are answered locally since roles/powerdns took over the served
+# regions' reverse zones: the gateway PTRs are static snapshot/inventory
+# records, the client PTR is synthesized (community hex naming, verified
+# together with its forward record). Outside the served regions kresd
+# still forwards to the community DNS.
 #
-# It also reports informational probes: the gateway's own address per region
-# and one IPv4 client address (no PTR exists upstream, as on the legacy
-# unbound gateway). Those never fail the run.
+# It also reports informational probes: the gateway's own address per
+# region. Those never fail the run.
 #
 #   ansible-playbook playbooks/gateway-reverse-check.yml
 #   ansible-playbook playbooks/gateway-reverse-check.yml --check --diff

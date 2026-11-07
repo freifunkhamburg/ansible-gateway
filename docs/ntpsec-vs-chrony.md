@@ -9,17 +9,31 @@ de-selected: its unit is stopped and its package is purged on gw05.
 Selection is one variable: `ntp_backend: chrony | ntpsec` in
 `inventories/group_vars/all/main.yml`.
 
-## What the current config does
+## Current config (chrony selected)
 
-- Upstream servers (`gw_ntp_server_lines`): `ntp0.iphh.net`, `ntp1.iphh.net`,
-  `ptbtime2.ptb.de`, `ptbtime3.ptb.de` (IPv4 only: `server -4`).
-- `server 127.127.1.0` + `fudge ... stratum 10`: local-clock fallback so the
-  gateway can still serve time when the uplink is down.
-- `restrict default ignore` for v4 and v6, then explicit allows for the
-  upstream servers, loopback, and the mesh ranges (`10.112.0.0/16` and
-  `2a03:2267::/32`) with `kod ... limited` — i.e. rate-limited answers, no
-  monitoring/peer/mode-6 access.
-- `disable monitor`.
+`roles/services/templates/chrony.conf.j2` renders, from the shared
+`ntp_upstream_servers` list (`ntp0.iphh.net`, `ntp1.iphh.net`,
+`ptbtime2.ptb.de`, `ptbtime3.ptb.de`):
+
+- `server <name> iburst` per upstream. chrony resolves each name's A and
+  AAAA records itself, so IPv6 upstream works (the ntpsec template pins
+  `server -4`).
+- `local stratum 10` -- the unsynchronised local-clock fallback, so the
+  gateway can still serve time with the uplink down.
+- `allow 10.112.0.0/16`, `allow 2a03:2267::/32`, `allow fe80::/10`,
+  `allow 127.0.0.1`, `allow ::1` -- mesh-only service; upstream peers are
+  not served.
+- `ratelimit interval 3 burst 20 kod 2` and `clientloglimit 4194304` --
+  rate-limited answers with per-client counters instead of opaque `kod`
+  counters.
+- `makestep 1.0 -1`, `maxslewrate 1000`, `maxupdateskew 100.0`.
+
+The ntpsec template (`templates/ntpsec.conf.j2`, rendered only when
+`ntp_backend: ntpsec`) keeps the classic shape: `server -4` peers,
+`restrict -4/-6 default ignore`, and per-net `restrict ... kod notrap nomodify
+nopeer noquery limited`. The per-host `gw_ntp_*` lists are gone; both
+templates read the same shared `ntp_upstream_servers` and derive the mesh
+nets from `mesh_v4_aggregate` / `mesh_v6_aggregate`.
 
 ## Live-state finding (fixed)
 
@@ -31,6 +45,7 @@ The Ansible handler had not been flushed in that run.
 
 Fixed by restarting: peers are now `netview1.server` (= ntp0.iphh.net),
 `ntp1.iphh.net`, `ptbtime2.ptb.de`, `ptbtime3.ptb.de`, plus `LOCAL(0)`.
+That was the ntpsec daemon, before the switch to chrony.
 
 The role now also guards this: a task compares the unit's start timestamp with
 the config mtime and restarts when the daemon predates its config. That is
@@ -90,6 +105,7 @@ Implemented `/etc/chrony/chrony.conf` (gw05):
 driftfile /var/lib/chrony/chrony.drift
 makestep 1.0 -1
 maxslewrate 1000
+maxupdateskew 100.0
 logdir /var/log/chrony
 log tracking statistics
 
@@ -105,6 +121,7 @@ local stratum 10
 # mesh ACL (replaces restrict ... kod limited)
 allow 10.112.0.0/16
 allow 2a03:2267::/32
+allow fe80::/10
 allow 127.0.0.1
 allow ::1
 ratelimit interval 3 burst 20 kod 2
@@ -130,11 +147,11 @@ the second would fail or silently share via SO_REUSEADDR only for some modes.
 
 ## Implementation note
 
-If the switch is approved, the role should be parameterised (like the DNS
-backend):
+The switch is implemented in `roles/services` (backend selection, package
+install/purge, template choice). The stale-config guard (unit start timestamp
+vs config mtime) applies to whichever daemon is selected, and to kresd.
+Kea's DHCP options 42/56 advertise addresses, not daemon details, so they do
+not change with the backend.
 
-- `ntp_backend: ntpsec | chrony` in group vars.
-- Package install and template selection branch on it.
-- The stale-config guard (start timestamp vs config mtime) applies to both.
-- Kea's DHCP options 42/56 already advertise addresses, not daemon details, so
-  they do not change.
+The migration sketch above is the state the role now produces; the remaining
+manual step is only the first run that swaps packages on an existing host.

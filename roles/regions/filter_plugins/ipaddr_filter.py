@@ -73,6 +73,44 @@ def reverse_zone(value):
     return '.'.join(reversed(digits[:nibbles])) + '.ip6.arpa'
 
 
+def v6_ptr_owner(address, prefix):
+    """PTR owner name of `address` relative to the reverse zone of `prefix`.
+
+    v6_ptr_owner('2a03:2267:1::10', '2a03:2267:1::/64')
+      -> '0.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0'   (16 host nibbles, reversed)
+    """
+    n = ip_network(str(prefix), strict=False)
+    if n.version != 6 or n.prefixlen % 4 != 0:
+        raise ValueError(f"v6_ptr_owner needs a /4n IPv6 prefix: {prefix!r}")
+    addr = ip_address(str(address))
+    host_bits = (128 - n.prefixlen) // 4
+    offset = int(addr) - int(n.network_address)
+    if offset < 0:
+        raise ValueError(f"{address!r} is outside {prefix!r}")
+    digits = f"{offset:0{host_bits}x}"
+    return '.'.join(reversed(digits))
+
+
+def v6_synth_ptr(address, synth_prefix="ipv6-", origin="clients.hamburg.freifunk.net"):
+    """The synthesized PTR rdata for an IPv6 client address.
+
+    The community scheme (served by roles/powerdns inside the mesh and by
+    the community DNS outside it) uses the interface part as 16 hex
+    digits, so with origin 'sued.clients.hamburg.freifunk.net'
+    2a03:2267:1::5 -> 'ipv6-0000000000000005.sued.clients.hamburg.freifunk.net.'
+    """
+    host = int(ip_address(str(address))) & ((1 << 64) - 1)
+    return f"{synth_prefix}{host:016x}.{origin}."
+
+
+def ip_normalize(value):
+    """Canonical (compressed, lower-case) text form of an IP address.
+
+    '2a03:2267:1:0:0:0:0:fefe' -> '2a03:2267:1::fefe'
+    """
+    return str(ip_address(str(value).strip()))
+
+
 def snat_hosts(value):
     """Expand a published range ('193.96.224.24-193.96.224.31') into /32s.
 
@@ -155,6 +193,9 @@ class FilterModule(object):
             "net_only": net_only,
             "netmask": netmask,
             "reverse_zone": reverse_zone,
+            "v6_ptr_owner": v6_ptr_owner,
+            "v6_synth_ptr": v6_synth_ptr,
+            "ip_normalize": ip_normalize,
             "site48": site48,
             "snat_hosts": snat_hosts,
             "mac_prefix": mac_prefix,

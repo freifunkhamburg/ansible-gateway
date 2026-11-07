@@ -32,39 +32,28 @@
     group: root
     mode: "0755"
 
-# --- IPv4 client PTR synthesis (opt-in) --------------------------------
-- name: Install the lease export script
-  ansible.builtin.template:
-    src: client-ptr-export.sh.j2
-    dest: "{{ knot_client_ptr_export }}"
-    mode: "0755"
-  when: knot_client_ptr_enabled | bool
-
-- name: Install the client PTR policy Lua
-  ansible.builtin.template:
-    src: client-ptr.lua.j2
-    dest: "{{ knot_client_ptr_lua }}"
-    mode: "0644"
-  when: knot_client_ptr_enabled | bool
-
-- name: Install the lease export service and timer
-  ansible.builtin.template:
-    src: "{{ item.src }}"
-    dest: "/etc/systemd/system/{{ item.dest }}"
-    mode: "0644"
-  loop:
-    - { src: client-ptr.service.j2, dest: knot-client-ptr.service }
-    - { src: client-ptr.timer.j2, dest: knot-client-ptr.timer }
-  when: knot_client_ptr_enabled | bool
-
-- name: Enable and start the lease export timer
+# --- IPv4 client PTR lease export: removed ------------------------------
+# The old knot_client_ptr_* feature is gone; roles/powerdns synthesizes
+# PTRs for the whole mesh ranges instead. These tasks clean up gateways
+# that had it enabled.
+- name: Remove the client PTR export timer
   ansible.builtin.systemd_service:
     name: knot-client-ptr.timer
-    enabled: true
-    state: started
+    enabled: false
+    state: stopped
     daemon_reload: true
-  # In check mode the unit file was not written, so systemd cannot find it.
-  when: (knot_client_ptr_enabled | bool) and not ansible_check_mode
+  failed_when: false
+
+- name: Remove the client PTR files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /usr/local/bin/knot-client-ptr-export
+    - /etc/knot-resolver/client-ptr.lua
+    - /etc/systemd/system/knot-client-ptr.service
+    - /etc/systemd/system/knot-client-ptr.timer
+    - /var/lib/knot-resolver/leases4.csv
 
 - name: Render the kresd config
   ansible.builtin.template:
@@ -107,7 +96,8 @@
   until: knot_probe.stdout | length > 0
   when: not ansible_check_mode
 
-# Mesh gateway PTRs are answered by the community DNS, not from local data.
+# Mesh gateway PTRs are answered from inventory-derived static entries by the
+# local PowerDNS when it serves the region, otherwise by the community DNS.
 # A cached NXDOMAIN from an earlier configuration or a transient upstream
 # failure would make this gateway diverge from the legacy resolvers, so the
 # probe clears the cache once if the answer is missing.
@@ -151,13 +141,14 @@
   when: not ansible_check_mode
 
 # --- fresh IPv6 client PTR probes ---------------------------------------
-# Client addresses handed out by RA/SLAAC are named by the community DNS from
-# the address itself: ipv6-<16 nibbles>.<region>.clients.hamburg.freifunk.net.
+# Client addresses handed out by RA/SLAAC are answered from the address
+# itself: the local PowerDNS (roles/powerdns) and the community DNS agree
+# on the community naming
+# ipv6-<16 hex interface part>.<region>.clients.hamburg.freifunk.net.
 # The probe address is derived from the run time so it is (almost) never in
-# the resolver cache. That is what makes this a regression test for the 0x20
-# case-randomisation defect: a cached answer would mask a broken forward
-# (kresd would send a mixed-case QNAME and get NXDOMAIN from the upstream
-# case-sensitive backend). See docs/knot-resolver.md.
+# the resolver cache; with the upstream variant that also keeps it a real
+# regression test for the 0x20 case-randomisation defect (a cached answer
+# would mask it).  See docs/knot-resolver.md.
 - name: Compose fresh IPv6 client PTR probes per served region
   ansible.builtin.set_fact:
     knot_client_rev_probes: >-
@@ -170,11 +161,11 @@
                    | host_in((knot_probe_seed | int % 0xffff) + 0x100000
                              + (r.region_index | int) * 0x1000)
                    | addr_only,
-           'expected': 'ipv6-'
-                       ~ ('%016x' | format((knot_probe_seed | int % 0xffff) + 0x100000
-                                           + (r.region_index | int) * 0x1000))
-                       ~ '.' ~ (r.id | regex_replace('^hh', ''))
-                       ~ '.clients.hamburg.freifunk.net.'
+           'expected': ('ipv6-'
+                        ~ ('%016x' | format((knot_probe_seed | int % 0xffff) + 0x100000
+                                            + (r.region_index | int) * 0x1000))
+                        ~ '.' ~ (r.id | regex_replace('^hh', ''))
+                        ~ '.clients.hamburg.freifunk.net.')
          }] }}
   loop: "{{ served_regions }}"
   loop_control:
@@ -199,16 +190,18 @@
     label: "{{ p.region }} {{ p.host }}"
   when: not ansible_check_mode
 
-- name: Assert the fresh client PTRs resolve to the region clients name
+- name: Assert the fresh client PTRs resolve to the expected name
   ansible.builtin.assert:
     that:
       - res.stdout | trim | length > 0
       - res.stdout | trim == res.p.expected
     fail_msg: >-
       {{ res.p.host }} -> '{{ res.stdout | trim }}' (expected
-      '{{ res.p.expected }}'). This is the 0x20 case-randomisation defect:
-      kresd must forward lower-case QNAMEs to the community DNS
-      (policy.FLAGS('NO_0X20') on the mesh reverse zones).
+      '{{ res.p.expected }}'). With ffhh_dns_enabled check the local zones in
+      {{ ffhh_dns_lua | default('/etc/powerdns/ffhh-synth.lua') }}; otherwise
+      this is the 0x20 case-randomisation defect: kresd must forward
+      lower-case QNAMEs to the community DNS (policy.FLAGS('NO_0X20') on the
+      mesh reverse zones).
   loop: "{{ knot_client_rev.results }}"
   loop_control:
     loop_var: res
@@ -220,7 +213,7 @@
 - name: Probe the static IPv4 gateway PTR through Knot Resolver
   ansible.builtin.command:
     cmd: >-
-      dig +short +time=5 +tries=1 -x {{ knotd_v4_static_probe }}
+      dig +short +time=5 +tries=1 -x {{ ffhhdns_static_probe }}
       @127.0.0.1 -p {{ knot_port }}
   register: knot_v4_static_path
   changed_when: false
@@ -230,19 +223,19 @@
   until: knot_v4_static_path.stdout | trim == 'gw05.ffhh.'
   when:
     - not ansible_check_mode
-    - knotd_enabled | bool
+    - ffhh_dns_enabled | default(false) | bool
 
 - name: Assert the static IPv4 gateway PTR reaches clients
   ansible.builtin.assert:
     that:
       - knot_v4_static_path.stdout | trim == 'gw05.ffhh.'
     fail_msg: >-
-      {{ knotd_v4_static_probe }} -> '{{ knot_v4_static_path.stdout | trim }}'
-      (expected gw05.ffhh.). The kresd rules-DB forward to roles/knotd is not
-      working; check policy.rule_forward_add() in {{ knot_conf }}.
+      {{ ffhhdns_static_probe }} -> '{{ knot_v4_static_path.stdout | trim }}'
+      (expected gw05.ffhh.). The kresd rules-DB forward to roles/powerdns is
+      not working; check policy.rule_forward_add() in {{ knot_conf }}.
   when:
     - not ansible_check_mode
-    - knotd_enabled | bool
+    - ffhh_dns_enabled | default(false) | bool
 
 - name: Verify the resolver version
   ansible.builtin.command: "{{ knot_bin }} --version"
@@ -260,23 +253,3 @@
       client PTRs: {{ (knot_client_rev.results | default([]))
                       | map(attribute='stdout') | map('trim') | join(', ') }}
   when: not ansible_check_mode
-
-- name: Remove the client PTR artefacts when the feature is off
-  ansible.builtin.systemd_service:
-    name: knot-client-ptr.timer
-    enabled: false
-    state: stopped
-    daemon_reload: true
-  when: not (knot_client_ptr_enabled | bool)
-  failed_when: false
-
-- name: Remove the client PTR files when the feature is off
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: absent
-  loop:
-    - "{{ knot_client_ptr_export }}"
-    - "{{ knot_client_ptr_lua }}"
-    - /etc/systemd/system/knot-client-ptr.service
-    - /etc/systemd/system/knot-client-ptr.timer
-  when: not (knot_client_ptr_enabled | bool)

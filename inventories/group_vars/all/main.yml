@@ -62,7 +62,7 @@ batctl_path: /usr/local/sbin/batctl
 
 # One release for every gateway. The build role resolves this tag (a commit
 # pin is optional); the installed module and batctl are asserted against it.
-batman_release: v2026.3
+batman_release: v2026.4
 batman_compat_version: 15
 batman_build_dir: /opt/src
 

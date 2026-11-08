@@ -66,7 +66,7 @@ live in `region_vars/hhwest.yml` and are selected by `roles/regions` for the
 gateway that serves the NBMA region. Gateways not serving it get an empty list.
 
 ### `builds` — removed
-The batman/batctl release is one shared value (`batman_release: v2026.3`) in
+The batman/batctl release is one shared value (`batman_release: v2026.4`) in
 `group_vars/all`, and `roles/batman_build` owns the repository URLs, build
 directory and module path. No per-host build tree is stored. Go, ICVPN scripts,
 Checkmk and Kea builds were removed from the build role.

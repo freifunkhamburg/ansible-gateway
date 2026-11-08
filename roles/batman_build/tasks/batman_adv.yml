@@ -8,11 +8,30 @@
     version: "{{ batman_adv_commit | default(batman_release) }}"
     update: true
 
+# Stamp keyed on release AND running kernel. The .ko is kernel-specific
+# (vermagic): after a kernel upgrade the module must be rebuilt even though
+# the source tree is unchanged. A stamp on the .ko itself could not tell the
+# two cases apart, and the old one was re-installed into the new kernel's
+# module directory, where modprobe rejects it (Exec format error).
+- name: Check the batman-adv build stamp for this release and kernel
+  ansible.builtin.stat:
+    path: "{{ batman_build_dir }}/.batman-adv-built-{{ batman_release }}-{{ ansible_kernel }}"
+  register: batman_stamp
+
 - name: Build batman-adv module
   ansible.builtin.command:
     cmd: make -j{{ ansible_processor_vcpus | default(2) }}
     chdir: "{{ batman_build_dir }}/batman-adv"
-    creates: "{{ batman_build_dir }}/batman-adv/net/batman-adv/batman-adv.ko"
+  when: not batman_stamp.stat.exists
+
+- name: Record the batman-adv build stamp
+  ansible.builtin.file:
+    path: "{{ batman_build_dir }}/.batman-adv-built-{{ batman_release }}-{{ ansible_kernel }}"
+    state: touch
+    owner: root
+    group: root
+    mode: "0644"
+  when: not batman_stamp.stat.exists
 
 - name: Ensure module install directory
   ansible.builtin.file:
@@ -46,11 +65,35 @@
   changed_when: false
   check_mode: false
 
-- name: Assert the loaded module matches the release
+- name: Assert the installed module matches the release
   ansible.builtin.assert:
     that:
       - "(batman_release | regex_replace('^v', '')) in batman_version.stdout"
     fail_msg: >-
-      The loaded module reports {{ batman_version.stdout }}; expected
+      The installed module reports {{ batman_version.stdout }}; expected
       {{ batman_release | regex_replace('^v', '') }}.
     quiet: true
+
+# The running module's source version is only visible as
+# /sys/module/batman_adv/srcversion (sysfs names the module with underscores,
+# and there is no `version` attribute there -- modinfo reads the .ko on disk).
+# While the bat interfaces hold the old module, the running mesh keeps using
+# it: report the gap instead of hiding it; a mesh restart (or reboot)
+# activates the installed one.
+- name: Compare the running module with the installed one
+  ansible.builtin.shell:
+    cmd: |
+      disk=$(/sbin/modinfo -F srcversion batman-adv)
+      run=$(cat /sys/module/batman_adv/srcversion 2>/dev/null || echo "not loaded")
+      if [ "$disk" = "$run" ]; then
+        echo "running module matches the installed one"
+      else
+        echo "installed module differs from running ($run): mesh restart or reboot activates it"
+      fi
+  changed_when: false
+  register: batman_running
+  failed_when: false
+
+- name: Show the running vs installed module state
+  ansible.builtin.debug:
+    msg: "{{ batman_running.stdout }}"

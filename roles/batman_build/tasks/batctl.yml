@@ -8,11 +8,29 @@
     version: "{{ batctl_commit | default(batman_release) }}"
     update: true
 
+# The stamp is keyed on the release, not on the binary: `creates` pointing at
+# batctl/batctl made the build un-runnable as an upgrade -- after the git task
+# checked out a newer tag, make was skipped (the old binary still existed)
+# and the stale artifact was installed. No stamp for this release -> rebuild.
+- name: Check the batctl build stamp for this release
+  ansible.builtin.stat:
+    path: "{{ batman_build_dir }}/.batctl-built-{{ batman_release }}"
+  register: batctl_stamp
+
 - name: Build batctl
   ansible.builtin.command:
     cmd: make -j{{ ansible_processor_vcpus | default(2) }}
     chdir: "{{ batman_build_dir }}/batctl"
-    creates: "{{ batman_build_dir }}/batctl/batctl"
+  when: not batctl_stamp.stat.exists
+
+- name: Record the batctl build stamp
+  ansible.builtin.file:
+    path: "{{ batman_build_dir }}/.batctl-built-{{ batman_release }}"
+    state: touch
+    owner: root
+    group: root
+    mode: "0644"
+  when: not batctl_stamp.stat.exists
 
 - name: Install batctl
   ansible.builtin.copy:

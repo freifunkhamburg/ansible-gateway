@@ -19,11 +19,24 @@ when needed (`changed=0` on a current host).
 
 **2. Pinned versions in inventory** — reproducible, but silent drift:
 
-- `batman_release` — `v2026.3` in `group_vars/all` (one value for every
+- `batman_release` — `v2026.4` in `group_vars/all` (one value for every
   gateway).
 - `mesh_announce_commit` — `40be9a1`.
 
 Nothing warns when upstream moves past a pin. That is what the checker is for.
+
+Applying a pin bump: change `batman_release` and run the playbook. The role
+re-checks out the tag and rebuilds both components; build stamps
+(`.batctl-built-<release>`, `.batman-adv-built-<release>-<kernel>`) decide
+whether a rebuild is needed, so the same release is never rebuilt and a
+**kernel upgrade forces a module rebuild** even when the source tree is
+unchanged. The new `batctl` is live immediately; the new kernel module is
+installed under `updates/` and modprobe-resolves from then on, but the
+running mesh keeps the old module until a mesh restart or reboot (the bat
+interfaces hold it). The role prints
+`running vs installed` in that case. Wire compatibility is checked via
+`BATADV_COMPAT_VERSION` (still 15 across 2026.3 -> 2026.4), so gateways can
+be upgraded one at a time.
 
 **3. Package-managed** — Kea (ISC cloudsmith repo), BIRD, vnstat, fail2ban etc.
 are updated by `apt upgrade`; upstream tags are irrelevant except as a hint

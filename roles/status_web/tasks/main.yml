@@ -1,0 +1,200 @@
+---
+# Lean mesh-facing status page: a static HTML page plus three PNG charts,
+# sampled and rendered by cron and served by lighttpd bound only to the
+# gateway's mesh addresses. No JavaScript, no application server.
+
+- name: Install status page packages (lighttpd, RRDtool, python3 for lease CSVs)
+  ansible.builtin.package:
+    name:
+      - lighttpd
+      - rrdtool
+      - python3
+    state: present
+
+- name: Create the web and data directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ status_web_root }}"
+    - "{{ status_web_data }}"
+
+# One-time creation; afterwards the cron job owns the files. Heartbeat 180 s
+# for a 60 s step tolerates two missed samples; minute data covers 24 h,
+# 30-minute consolidation 8 weeks.
+- name: Create the RRD databases
+  ansible.builtin.shell:
+    cmd: |
+      set -e
+      cd {{ status_web_data }}
+      test -f uplink.rrd || rrdtool create uplink.rrd --step 60 \
+        DS:rx:COUNTER:180:0:1000000000000 DS:tx:COUNTER:180:0:1000000000000 \
+        RRA:AVERAGE:0.5:1:1440 RRA:AVERAGE:0.5:30:2688
+      test -f load.rrd || rrdtool create load.rrd --step 60 \
+        DS:load1:GAUGE:180:0:100000 DS:load5:GAUGE:180:0:100000 \
+        RRA:AVERAGE:0.5:1:1440 RRA:AVERAGE:0.5:30:2688
+      test -f memory.rrd || rrdtool create memory.rrd --step 60 \
+        DS:used:GAUGE:180:0:100000000 DS:total:GAUGE:180:0:100000000 \
+        RRA:AVERAGE:0.5:1:1440 RRA:AVERAGE:0.5:30:2688
+    executable: /bin/bash
+  changed_when: false
+
+- name: Install the status sampler/renderer script
+  ansible.builtin.template:
+    src: gw-status.sh.j2
+    dest: "{{ status_web_script }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render the lighttpd configuration
+  ansible.builtin.template:
+    src: lighttpd.conf.j2
+    dest: /etc/lighttpd/lighttpd.conf
+    owner: root
+    group: root
+    mode: "0644"
+    validate: "lighttpd -t -f %s"
+  notify: Restart lighttpd
+
+# The Debian package ships enabled example snippets; the rendered config
+# does not include them, so nothing else can add listeners. Disable the
+# defaults anyway so a package update cannot resurrect them.
+- name: Disable the distribution lighttpd snippets
+  ansible.builtin.find:
+    paths: /etc/lighttpd/conf-enabled
+    file_type: any
+  register: lighttpd_snippets
+
+- name: Remove enabled snippet symlinks
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ lighttpd_snippets.files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  notify: Restart lighttpd
+
+- name: Install the sampling/rendering cron jobs
+  ansible.builtin.template:
+    src: cron.j2
+    dest: /etc/cron.d/gw-status
+    owner: root
+    group: root
+    mode: "0644"
+
+# systemd applies start-rate limits; a previously crash-looped unit keeps
+# "start request repeated too quickly" until the counter is cleared.
+- name: Clear the lighttpd start-rate-limit counter
+  ansible.builtin.command:
+    cmd: systemctl reset-failed lighttpd.service
+  changed_when: false
+
+- name: Enable and start lighttpd
+  ansible.builtin.service:
+    name: lighttpd
+    state: started
+    enabled: true
+
+- name: Apply pending lighttpd restarts before verifying
+  ansible.builtin.meta: flush_handlers
+
+# Produce the first page immediately (the cron jobs take over afterwards);
+# only when it is missing so repeat runs stay clean.
+- name: Check for an existing status page
+  ansible.builtin.stat:
+    path: "{{ status_web_root }}/index.html"
+  register: status_index
+
+- name: Generate the first status page and chart
+  ansible.builtin.command:
+    cmd: "{{ status_web_script }} all"
+  when: not status_index.stat.exists
+  changed_when: true
+
+# --- verification -------------------------------------------------------
+# The gateway reaches its own mesh address over loopback routing, which is
+# enough to prove the listener and content; the firewall rule keeps the
+# page mesh-only for everyone else.
+- name: Wait for the mesh listeners
+  ansible.builtin.wait_for:
+    host: "{{ item.v4_host }}"
+    port: "{{ status_web_port }}"
+    timeout: 15
+  loop: "{{ served_regions }}"
+
+# No until/retries here: on a looped task, a retried item replaces its plain
+# result with an attempts wrapper, which would break the assertion below.
+- name: Fetch the page over each served region address
+  ansible.builtin.uri:
+    url: "{{ item }}"
+    timeout: 5
+  loop: >-
+    {{ (served_regions | map(attribute='v4_host') | list
+        + served_regions | map(attribute='v6_host')
+                      | map('regex_replace', '^(.*)$', '[\1]') | list)
+       | map('regex_replace', '^(.*)$', 'http://\1:__PORT__/')
+       | map('regex_replace', '__PORT__', status_web_port | string)
+       | list }}
+  register: status_fetch
+  changed_when: false
+
+- name: Assert every address serves the page
+  ansible.builtin.assert:
+    that:
+      - item.status == 200
+    fail_msg: "Status page from {{ item.item }} answered {{ item.status }}"
+    quiet: true
+  loop: "{{ status_fetch.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Store the page for content checks
+  ansible.builtin.uri:
+    url: "http://{{ served_regions[0].v4_host }}:{{ status_web_port }}/"
+    dest: /run/gw-status-check.html
+    timeout: 5
+  changed_when: false
+
+- name: Read the stored page
+  ansible.builtin.command:
+    cmd: "grep -c '{{ item.pattern }}' /run/gw-status-check.html"
+  loop:
+    - name: name
+      pattern: "{{ ffhh_host_name }}"
+      min: 1
+    - name: images
+      pattern: "<img "
+      min: 3
+    - name: no-javascript
+      pattern: "<script"
+      min: 0
+  loop_control:
+    label: "{{ item.name }}"
+  register: status_grep
+  # grep exits 1 on zero matches; the assertion below judges the count.
+  failed_when: status_grep.rc not in [0, 1]
+  changed_when: false
+
+- name: Assert the page content (name shown, three charts, no JavaScript)
+  ansible.builtin.assert:
+    that:
+      - (item.stdout | int) >= item.item.min
+      - (item.item.name != 'no-javascript') or ((item.stdout | int) == 0)
+    fail_msg: >-
+      {{ item.item.name }}: found {{ item.stdout | default('0') }},
+      expected {{ 'none' if item.item.name == 'no-javascript'
+                  else ('at least ' ~ item.item.min) }}
+    quiet: true
+  loop: "{{ status_grep.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Remove the temporary page copy
+  ansible.builtin.file:
+    path: /run/gw-status-check.html
+    state: absent
+  changed_when: false   # the store/remove pair is a read-only probe

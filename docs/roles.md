@@ -25,6 +25,7 @@ with non-obvious behaviour.
 | `ssh` | SSH hardening drop-in (validated with `sshd -t`), administrator keys, key-only assertion | `ffhh-hardening.conf.j2` | `ffhh_ssh_authorized_keys`, `ssh_ciphers`/`_macs`/`_kex` |
 | `operations` | Health and operator scripts, cron jobs, vnstat interface policy, motd | `check-gateway.j2`, `check.sh.j2`, `check-sanitized.sh.j2`, `motd-refresh.j2`, `batman-health-report.j2`, `upstream-versions-report.j2`, `update-fastd-keys.j2`, `cron/*.j2` | `gw_check_*`, `mesh_forward_hosts`, paths from `group_vars` |
 | `mesh_announce` | mesh-announce (renamed respondd) checkout at the pinned commit, single `respondd.conf`, unit, domain verification | `respondd.conf.j2`, unit template | `gw_regions` + region `gluon_domain`, `mesh_announce_commit` |
+| `status_web` | static mesh-facing status page (light, rrdtool + lighttpd bound to the region addresses only), minute sampling + 5-minute render cron | see `docs/status-web.md` | `status_web_*`, `served_regions` |
 | `firewall` | netfilter packages, rendered persistent `rules.v4`/`rules.v6`, restore-on-change | `rules.v4.j2`, `rules.v6.j2` | `gw_ssh_allowlist`, derived addresses/NAT |
 
 ## Gating

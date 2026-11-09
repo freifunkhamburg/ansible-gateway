@@ -110,7 +110,7 @@ ansible-gateway/
   roles/
     base  regions  network  mesh  batman_build  data_sync
     kea  bird  services  powerdns  knot  knot_build  knot_test
-    fastd  ssh  operations  mesh_announce  firewall
+    fastd  ssh  operations  mesh_announce  status_web  firewall
   inventories/                 see above
   docs/                        architecture and operational notes
   tools/                       checkers used by the playbooks

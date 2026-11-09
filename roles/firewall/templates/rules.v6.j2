@@ -21,6 +21,7 @@ COMMIT
 -A INPUT -s {{ mesh_v6_aggregate }} -p udp -m udp --dport 5000:5010 -j ACCEPT
 -A INPUT -p udp -m udp --dport 5000:5010 -j DROP
 -A INPUT -p tcp -m tcp --dport 161 -j DROP
+-A INPUT -p tcp -m tcp --dport 80 ! -s {{ mesh_v6_aggregate }} -m comment --comment "status page: mesh only" -j DROP
 -A INPUT ! -s {{ mesh_v6_aggregate }} -p udp -m udp --dport 123 -m recent --set --name NTPTRAFFIC --mask ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff --rsource
 -A INPUT ! -s {{ mesh_v6_aggregate }} -p udp -m udp --dport 123 -m recent --update --seconds 30 --hitcount 20 --name NTPTRAFFIC --mask ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff --rsource -j DROP
 -A INPUT -p udp -m udp --dport 123 -j ACCEPT

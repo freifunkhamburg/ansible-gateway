@@ -36,4 +36,5 @@
     - ssh           # hardening + administrator keys
     - operations    # health scripts, cron, vnstat interface policy
     - mesh_announce # respondd
+    - status_web    # static mesh-facing status page (lighttpd + RRD)
     - firewall      # last: render and apply the ruleset

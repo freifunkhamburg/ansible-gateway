@@ -1,0 +1,32 @@
+# Managed by ansible (roles/status_web) -- do not edit on the host.
+#
+# Minimal static-file server for the gateway status page. Listeners exist
+# ONLY on the mesh (bat-interface) addresses of the served regions, both
+# families; there is no wildcard bind, so nothing listens on intra-as,
+# the uplink or loopback. The firewall additionally restricts TCP/80 to
+# mesh sources (defence in depth).
+#
+# lighttpd always creates the default server.bind:server.port listener in
+# addition to $SERVER["socket"] entries (a port of 0 is treated as unset
+# and falls back to 80), so the default listener is pinned to the first
+# region address and the remaining seven are added explicitly.
+
+server.modules = ( "mod_access" )
+
+server.bind          = "{{ served_regions[0].v4_host }}"
+server.port          = {{ status_web_port }}
+
+server.document-root = "{{ status_web_root }}"
+server.username      = "www-data"
+server.groupname     = "www-data"
+server.errorlog      = "/var/log/lighttpd/error.log"
+
+index-file.names     = ( "index.html" )
+server.follow-symlink = "disable"
+
+{% for r in served_regions %}
+{% if not loop.first %}
+$SERVER["socket"] == "{{ r.v4_host }}:{{ status_web_port }}" { }
+{% endif %}
+$SERVER["socket"] == "[{{ r.v6_host }}]:{{ status_web_port }}" { }
+{% endfor %}

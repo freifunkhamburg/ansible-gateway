@@ -1,0 +1,184 @@
+#!/bin/bash
+# Managed by ansible (roles/status_web) -- do not edit on the host.
+#
+# gw-status: sample gateway metrics into RRD files (`sample`, every minute)
+# and regenerate the static status page and its PNG charts (`render`, every
+# five minutes). The page is pure HTML plus <img>; the only refresh
+# mechanism is a <meta http-equiv="refresh"> tag. No JavaScript.
+set -u
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+ROOT="{{ status_web_root }}"
+DATA="{{ status_web_data }}"
+UPLINK="{{ uplink_if }}"
+REFRESH={{ status_web_refresh }}
+LEASES4="{{ status_web_leases4_csv }}"
+LEASES6="{{ status_web_leases6_csv }}"
+
+sample() {
+    local now rx tx l1 l5 mt ma used
+    now=$(date +%s)
+    rx=$(cat "/sys/class/net/$UPLINK/statistics/rx_bytes")
+    tx=$(cat "/sys/class/net/$UPLINK/statistics/tx_bytes")
+    read -r l1 l5 _ < /proc/loadavg || return 1
+    mt=$(( $(awk '/^MemTotal:/{print $2}' /proc/meminfo) / 1024 ))
+    ma=$(( $(awk '/^MemAvailable:/{print $2}' /proc/meminfo) / 1024 ))
+    used=$(( mt - ma ))
+
+    rrdtool update "$DATA/uplink.rrd"  "N:$rx:$tx"
+    rrdtool update "$DATA/load.rrd"    "N:$l1:$l5"
+    rrdtool update "$DATA/memory.rrd"  "N:$used:$mt"
+
+    # Last-sample instantaneous rate (bit/s) for the headline number.
+    if [ -f "$DATA/prev" ]; then
+        local prx ptx pts dt drx dtx
+        read -r prx ptx pts < "$DATA/prev"
+        dt=$(( now - pts )); [ "$dt" -ge 1 ] || dt=60
+        drx=$(( (rx - prx) * 8 / dt ))
+        dtx=$(( (tx - ptx) * 8 / dt ))
+        # Counter reset (reboot / interface recreate): clamp to zero.
+        [ "$drx" -ge 0 ] || drx=0
+        [ "$dtx" -ge 0 ] || dtx=0
+        printf '%s %s\n' "$drx" "$dtx" > "$DATA/current"
+    fi
+    printf '%s %s %s\n' "$rx" "$tx" "$now" > "$DATA/prev"
+}
+
+# bit/s -> human string (kbit/Mbit/Gbit)
+human() {
+    awk -v b="$1" 'BEGIN {
+        if (b >= 1e9)      printf "%.2f Gbit/s", b / 1e9;
+        else if (b >= 1e6) printf "%.2f Mbit/s", b / 1e6;
+        else if (b >= 1e3) printf "%.1f kbit/s", b / 1e3;
+        else               printf "%d bit/s",  b;
+    }'
+}
+
+leases() {  # $1 = kea lease csv; prints the count of active (state 0) rows
+    python3 -c '
+import csv, sys
+try:
+    rows = csv.DictReader(open(sys.argv[1]))
+    print(sum(1 for r in rows if (r.get("state") or "").strip() == "0"))
+except Exception:
+    print("-")
+' "$1" 2>/dev/null || echo "-"
+}
+
+render() {
+    local l1 l5 l15 cpus mt ma used pct vpn s n crx ctx
+    read -r l1 l5 l15 _ < /proc/loadavg || return 1
+    cpus=$(nproc)
+    mt=$(( $(awk '/^MemTotal:/{print $2}' /proc/meminfo) / 1024 ))
+    ma=$(( $(awk '/^MemAvailable:/{print $2}' /proc/meminfo) / 1024 ))
+    used=$(( mt - ma ))
+    pct=$(( used * 100 / mt ))
+
+    vpn=0
+    for s in {{ status_web_fastd_sockets }}; do
+        [ -e "$s" ] || continue
+        n=$(FASTD_SOCKET="$s" fastd-query connections 2>/dev/null | head -n1 | tr -dc '0-9')
+        case "$n" in ''|*[!0-9]*) n=0 ;; esac
+        vpn=$(( vpn + 10#$n ))
+    done
+
+    local l4 l6
+    l4=$(leases "$LEASES4")
+    l6=$(leases "$LEASES6")
+
+    crx=0; ctx=0
+    [ -f "$DATA/current" ] && read -r crx ctx < "$DATA/current"
+
+    # --- charts (PNG, RRDtool; no client-side scripting involved) ---------
+    rrdtool graph "$ROOT/uplink-24h.png" \
+        --title "Uplink throughput, last 24 h" --vertical-label "Mbit/s" \
+        --start -86400 --width 600 --height 150 --alt-y-grid --units-exponent 6 \
+        --color GRID#dddddd --color MGRID#cccccc \
+        DEF:rx=$DATA/uplink.rrd:rx:AVERAGE \
+        DEF:tx=$DATA/uplink.rrd:tx:AVERAGE \
+        CDEF:rxb=rx,8,* CDEF:txb=tx,8,* \
+        AREA:rxb#"#3a9d3a":"down " \
+        LINE1:txb#"#2255cc":"up  " \
+        GPRINT:rxb:AVERAGE:"avg %6.2lf" GPRINT:rxb:MAX:"max %6.2lf\l" \
+        GPRINT:txb:AVERAGE:"avg %6.2lf" GPRINT:txb:MAX:"max %6.2lf\l" \
+        >/dev/null 2>&1 || true
+
+    rrdtool graph "$ROOT/load-24h.png" \
+        --title "CPU load, last 24 h" --vertical-label "load average" \
+        --start -86400 --width 600 --height 150 --alt-y-grid --lower-limit 0 \
+        --color GRID#dddddd --color MGRID#cccccc \
+        DEF:l1=$DATA/load.rrd:load1:AVERAGE \
+        DEF:l5=$DATA/load.rrd:load5:AVERAGE \
+        AREA:l1#"#d97706":"load1" \
+        LINE1:l5#"#7c3aed":"load5" \
+        HRULE:$cpus#"#cc2222":"$cpus cores" \
+        GPRINT:l1:AVERAGE:"avg %6.2lf" GPRINT:l1:MAX:"max %6.2lf\l" \
+        >/dev/null 2>&1 || true
+
+    rrdtool graph "$ROOT/memory-24h.png" \
+        --title "Memory used, last 24 h" --vertical-label "MiB" \
+        --start -86400 --width 600 --height 150 --alt-y-grid --lower-limit 0 \
+        --color GRID#dddddd --color MGRID#cccccc \
+        DEF:used=$DATA/memory.rrd:used:AVERAGE \
+        DEF:total=$DATA/memory.rrd:total:AVERAGE \
+        AREA:used#"#0e7490":"used" \
+        LINE1:total#"#999999":"total" \
+        GPRINT:used:AVERAGE:"avg %6.0lf" GPRINT:used:MAX:"max %6.0lf\l" \
+        >/dev/null 2>&1 || true
+
+    # --- the page ----------------------------------------------------------
+    cat > "$ROOT/index.html" <<EOF
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="$REFRESH">
+<title>{{ ffhh_host_name }} &mdash; gateway status</title>
+<style>
+body  { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 660px;
+        color: #222; background: #fff; }
+h1    { font-size: 1.35rem; margin-bottom: .3rem; }
+p.sub { color: #666; margin-top: 0; }
+table { border-collapse: collapse; width: 100%; margin-bottom: 1.2rem; }
+td    { padding: .35rem .4rem; border-bottom: 1px solid #e3e3e3; }
+td.v  { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+img   { display: block; max-width: 100%; height: auto; margin-bottom: .8rem; }
+.foot { color: #777; font-size: .8rem; margin-top: 1.2rem; }
+a     { color: #2255cc; text-decoration: none; }
+</style>
+</head>
+<body>
+<h1>{{ ffhh_host_name }}</h1>
+<p class="sub">Freifunk Hamburg mesh gateway &mdash; status</p>
+<table>
+<tr><td>CPU load (1 / 5 / 15 min, $cpus cores)</td><td class="v">$l1 / $l5 / $l15</td></tr>
+<tr><td>Memory used / total</td><td class="v">$used MiB / $mt MiB ($pct%)</td></tr>
+<tr><td>Uplink throughput (last sample)</td><td class="v">down $(human "$crx") &middot; up $(human "$ctx")</td></tr>
+<tr><td>VPN connections (fastd, all instances)</td><td class="v">$vpn</td></tr>
+<tr><td>DHCP leases (v4 / v6)</td><td class="v">$l4 / $l6</td></tr>
+</table>
+<img src="uplink-24h.png" width="600" height="150" alt="uplink throughput, last 24 hours">
+<img src="load-24h.png"    width="600" height="150" alt="CPU load, last 24 hours">
+<img src="memory-24h.png"  width="600" height="150" alt="memory used, last 24 hours">
+<p class="foot">
+Generated $(date -u '+%Y-%m-%d %H:%M:%S UTC') &mdash; this page reloads
+every $(( REFRESH / 60 )) minutes; charts cover the last 24 hours.<br>
+Reachable from the mesh at:
+{% for r in served_regions %}<a href="http://{{ r.v4_host }}:{{ status_web_port }}/">{{ r.id }}</a>{{ " " }}
+{%- endfor %}<br>
+IPv6:
+{% for r in served_regions %}<a href="http://[{{ r.v6_host }}]:{{ status_web_port }}/">[{{ r.v6_host }}]</a>{{ " " }}
+{%- endfor %}
+</p>
+</body>
+</html>
+EOF
+    chmod 644 "$ROOT/index.html"
+}
+
+case "${1:-all}" in
+    sample) sample ;;
+    render) render ;;
+    all)    sample; render ;;
+    *) echo "usage: $0 {sample|render|all}" >&2; exit 2 ;;
+esac

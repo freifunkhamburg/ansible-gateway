@@ -1,0 +1,5 @@
+# Managed by ansible (roles/status_web). Sampling keeps one-minute chart
+# resolution; the page itself is rebuilt every five minutes and tells the
+# browser to reload at the same cadence (meta refresh, no JavaScript).
+* * * * * root {{ status_web_script }} sample
+*/5 * * * * root {{ status_web_script }} render

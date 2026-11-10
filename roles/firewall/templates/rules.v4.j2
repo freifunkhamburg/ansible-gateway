@@ -31,6 +31,8 @@ COMMIT
 -A INPUT -p udp -m udp --dport 123 -m recent --update --seconds 30 --hitcount 20 --name NTPTRAFFIC --mask 255.255.255.255 --rsource -j DROP
 -A INPUT -p udp -m udp --dport 123 -j ACCEPT
 -A INPUT -p udp -m udp --dport 5000:5010 -j DROP
+-A INPUT -i lo -p tcp -m tcp --dport 80 -m comment --comment "status page: local health checks" -j ACCEPT
+-A INPUT -i {{ intra_as_if }} -p tcp -m tcp --dport 80 -m comment --comment "status page: intra-as peers" -j ACCEPT
 -A INPUT -p tcp -m tcp --dport 80 ! -s {{ mesh_v4_aggregate }} -m comment --comment "status page: mesh only" -j DROP
 -A INPUT -p tcp -m tcp --dport 9000:9999 -j DROP
 {% for h in mesh_forward_hosts %}

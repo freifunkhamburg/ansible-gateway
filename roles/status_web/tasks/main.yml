@@ -1,7 +1,20 @@
 ---
-# Lean mesh-facing status page: a static HTML page plus three PNG charts,
-# sampled and rendered by cron and served by lighttpd bound only to the
-# gateway's mesh addresses. No JavaScript, no application server.
+# Lean status page: a static HTML page plus four PNG charts, sampled and
+# rendered by cron and served by lighttpd bound only to the gateway's mesh
+# and intra-as addresses. No JavaScript, no application server.
+#
+# The page is reachable from the public internet on the region IPv6
+# addresses (e.g. http://[2a03:2267:1::50]/) because those /64s are
+# announced upstream; roles/firewall admits TCP/80 to exactly those
+# destinations. DHCPv6 is stateless here, so no v6 lease count is shown.
+
+# The inventory addresses carry their prefix length; the listeners and the
+# probes want bare addresses. Plain Jinja split, not an ip filter: the
+# repo's filter plugins are scoped to roles/regions and not visible here.
+- name: Resolve the intra-as listener addresses
+  ansible.builtin.set_fact:
+    status_web_intra_v4: "{{ intra_as_v4.split('/') | first }}"
+    status_web_intra_v6: "{{ intra_as_v6.split('/') | first }}"
 
 - name: Install status page packages (lighttpd, RRDtool, python3 for lease CSVs)
   ansible.builtin.package:
@@ -22,25 +35,7 @@
     - "{{ status_web_root }}"
     - "{{ status_web_data }}"
 
-# One-time creation; afterwards the cron job owns the files. Heartbeat 180 s
-# for a 60 s step tolerates two missed samples; minute data covers 24 h,
-# 30-minute consolidation 8 weeks.
-- name: Create the RRD databases
-  ansible.builtin.shell:
-    cmd: |
-      set -e
-      cd {{ status_web_data }}
-      test -f uplink.rrd || rrdtool create uplink.rrd --step 60 \
-        DS:rx:COUNTER:180:0:1000000000000 DS:tx:COUNTER:180:0:1000000000000 \
-        RRA:AVERAGE:0.5:1:1440 RRA:AVERAGE:0.5:30:2688
-      test -f load.rrd || rrdtool create load.rrd --step 60 \
-        DS:load1:GAUGE:180:0:100000 DS:load5:GAUGE:180:0:100000 \
-        RRA:AVERAGE:0.5:1:1440 RRA:AVERAGE:0.5:30:2688
-      test -f memory.rrd || rrdtool create memory.rrd --step 60 \
-        DS:used:GAUGE:180:0:100000000 DS:total:GAUGE:180:0:100000000 \
-        RRA:AVERAGE:0.5:1:1440 RRA:AVERAGE:0.5:30:2688
-    executable: /bin/bash
-  changed_when: false
+
 
 - name: Install the status sampler/renderer script
   ansible.builtin.template:
@@ -49,6 +44,31 @@
     owner: root
     group: root
     mode: "0755"
+
+# The script owns the RRD schema: on a host upgrading from the old COUNTER
+# schema it recreates the files and backfills the last 24 h from vnstat.
+# Always take one sample so that migration happens on every run.
+- name: Ensure the RRD schema is current and history is backfilled
+  ansible.builtin.command:
+    cmd: "{{ status_web_script }} sample"
+  changed_when: false
+  check_mode: false
+
+- name: Count known points in the uplink RRD
+  ansible.builtin.shell:
+    cmd: "rrdtool fetch {{ status_web_data }}/uplink.rrd AVERAGE --start -86400 | grep -vc nan"
+  register: rrd_points
+  changed_when: false
+  check_mode: false
+
+- name: Assert the uplink chart has a populated history
+  ansible.builtin.assert:
+    that:
+      - rrd_points.stdout | int >= 100
+    fail_msg: >-
+      uplink.rrd holds only {{ rrd_points.stdout }} known points in the last
+      24 h; the vnstat backfill did not take (check vnstat on {{ uplink_if }}).
+    quiet: true
 
 - name: Render the lighttpd configuration
   ansible.builtin.template:
@@ -102,29 +122,32 @@
 - name: Apply pending lighttpd restarts before verifying
   ansible.builtin.meta: flush_handlers
 
-# Produce the first page immediately (the cron jobs take over afterwards);
-# only when it is missing so repeat runs stay clean.
-- name: Check for an existing status page
-  ansible.builtin.stat:
-    path: "{{ status_web_root }}/index.html"
-  register: status_index
-
-- name: Generate the first status page and chart
+# Render once here so the checks below see output from the just-installed
+# script (cron then redraws every five minutes). Rendering is a pure function
+# of the RRD contents, so this is idempotent and not reported as a change.
+- name: Render the page and charts now
   ansible.builtin.command:
-    cmd: "{{ status_web_script }} all"
-  when: not status_index.stat.exists
-  changed_when: true
+    cmd: "{{ status_web_script }} render"
+  changed_when: false
 
 # --- verification -------------------------------------------------------
-# The gateway reaches its own mesh address over loopback routing, which is
-# enough to prove the listener and content; the firewall rule keeps the
-# page mesh-only for everyone else.
-- name: Wait for the mesh listeners
+# The gateway reaches its own mesh and intra-as addresses over loopback
+# routing, which is enough to prove the listener and content. Anyone else
+# arrives through the firewall: tcp/80 is admitted to the region IPv6
+# addresses (public -- their /64s are announced upstream) and to the
+# intra-as listener, everything else is dropped. The render above fails the
+# play when RRDtool errors out, so a broken chart cannot be served silently;
+# a *malformed colour argument* is not an error to RRDtool (it just omits
+# the series), which is why the colour syntax is spelled out in the
+# template.
+- name: Wait for the mesh and intra-as listeners
   ansible.builtin.wait_for:
-    host: "{{ item.v4_host }}"
+    host: "{{ item }}"
     port: "{{ status_web_port }}"
     timeout: 15
-  loop: "{{ served_regions }}"
+  loop: >-
+    {{ (served_regions | map(attribute='v4_host') | list
+        + [status_web_intra_v4, status_web_intra_v6]) | list }}
 
 # No until/retries here: on a looped task, a retried item replaces its plain
 # result with an attempts wrapper, which would break the assertion below.
@@ -134,8 +157,10 @@
     timeout: 5
   loop: >-
     {{ (served_regions | map(attribute='v4_host') | list
+        + [status_web_intra_v4]
         + served_regions | map(attribute='v6_host')
-                      | map('regex_replace', '^(.*)$', '[\1]') | list)
+                      | map('regex_replace', '^(.*)$', '[\1]') | list
+        + ['[' ~ status_web_intra_v6 ~ ']'])
        | map('regex_replace', '^(.*)$', 'http://\1:__PORT__/')
        | map('regex_replace', '__PORT__', status_web_port | string)
        | list }}
@@ -151,6 +176,39 @@
   loop: "{{ status_fetch.results }}"
   loop_control:
     label: "{{ item.item }}"
+
+# The page must be publicly reachable on the region IPv6 addresses; that is
+# a firewall property, so check the live IPv6 ruleset (roles/firewall runs
+# before this role). The ACCEPT must exist and must precede the catch-all
+# DROP, otherwise ordering would make it dead.
+- name: Read the IPv6 INPUT ruleset
+  ansible.builtin.command:
+    cmd: ip6tables -S INPUT
+  register: status_web_v6_rules
+  changed_when: false
+  check_mode: false
+
+- name: Assert public TCP/80 is admitted on every region IPv6 address
+  ansible.builtin.assert:
+    that:
+      - >-
+        status_web_v6_rules.stdout is search(
+          '-d ' ~ (item.v6_host | regex_escape) ~ '/128 -p tcp -m tcp --dport '
+          ~ status_web_port ~ ' -m comment --comment "status page: public, mesh address '
+          ~ item.id ~ '" -j ACCEPT')
+      - >-
+        status_web_v6_rules.stdout.find(
+          '-d ' ~ (item.v6_host | regex_escape) ~ '/128 -p tcp -m tcp --dport '
+          ~ status_web_port) < status_web_v6_rules.stdout.find(
+          '--dport ' ~ status_web_port ~ ' -m comment --comment "status page: not a listener"')
+    fail_msg: >-
+      tcp/{{ status_web_port }} to {{ item.v6_host }} is not admitted from the
+      public internet by the live IPv6 ruleset (or the ACCEPT sits after the
+      DROP); re-run roles/firewall before status_web.
+    quiet: true
+  loop: "{{ served_regions }}"
+  loop_control:
+    label: "{{ item.id }}"
 
 - name: Store the page for content checks
   ansible.builtin.uri:
@@ -168,7 +226,7 @@
       min: 1
     - name: images
       pattern: "<img "
-      min: 3
+      min: 4
     - name: no-javascript
       pattern: "<script"
       min: 0
@@ -179,7 +237,7 @@
   failed_when: status_grep.rc not in [0, 1]
   changed_when: false
 
-- name: Assert the page content (name shown, three charts, no JavaScript)
+- name: Assert the page content (name shown, four charts, no JavaScript)
   ansible.builtin.assert:
     that:
       - (item.stdout | int) >= item.item.min

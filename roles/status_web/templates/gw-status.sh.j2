@@ -5,6 +5,16 @@
 # and regenerate the static status page and its PNG charts (`render`, every
 # five minutes). The page is pure HTML plus <img>; the only refresh
 # mechanism is a <meta http-equiv="refresh"> tag. No JavaScript.
+#
+# Uplink throughput has two sources, deliberately:
+#   * live sampling: the kernel byte counters of the uplink NIC, diffed per
+#     run -- 60 s resolution, freshest possible value;
+#   * vnstat: 5-minute buckets (about 48 h retention). Used for (a) the
+#     headline "last 5 min" figure -- a completed bucket matches the page's
+#     five-minute refresh cadence and is far steadier than a 60 s delta --
+#     and (b) a one-off backfill, so the charts are populated on a fresh
+#     deploy instead of showing only a sliver at the right edge of an empty
+#     24 h axis.
 set -u
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
@@ -13,35 +23,90 @@ DATA="{{ status_web_data }}"
 UPLINK="{{ uplink_if }}"
 REFRESH={{ status_web_refresh }}
 LEASES4="{{ status_web_leases4_csv }}"
-LEASES6="{{ status_web_leases6_csv }}"
+LOG="/var/log/gw-status.log"
 
-sample() {
-    local now rx tx l1 l5 mt ma used
-    now=$(date +%s)
-    rx=$(cat "/sys/class/net/$UPLINK/statistics/rx_bytes")
-    tx=$(cat "/sys/class/net/$UPLINK/statistics/tx_bytes")
-    read -r l1 l5 _ < /proc/loadavg || return 1
-    mt=$(( $(awk '/^MemTotal:/{print $2}' /proc/meminfo) / 1024 ))
-    ma=$(( $(awk '/^MemAvailable:/{print $2}' /proc/meminfo) / 1024 ))
-    used=$(( mt - ma ))
+# --- helpers ------------------------------------------------------------
 
-    rrdtool update "$DATA/uplink.rrd"  "N:$rx:$tx"
-    rrdtool update "$DATA/load.rrd"    "N:$l1:$l5"
-    rrdtool update "$DATA/memory.rrd"  "N:$used:$mt"
+# vnstat 5-minute buckets, complete ones only, as "ts bytes_rx bytes_tx".
+vnstat_buckets() {
+    python3 - "${1:-{{ uplink_if }}}" <<'PY'
+import json, subprocess, sys, time
+try:
+    out = subprocess.run(["vnstat", "-i", sys.argv[1], "--json"],
+                         capture_output=True, text=True, timeout=20).stdout
+    traf = json.loads(out)["interfaces"][0]["traffic"]
+except Exception:
+    sys.exit(0)
+now = int(time.time())
+for e in traf.get("fiveminute", []):
+    ts = e["timestamp"]
+    if ts + 300 <= now:            # skip the bucket still being filled
+        print(ts, e["rx"], e["tx"])
+PY
+}
 
-    # Last-sample instantaneous rate (bit/s) for the headline number.
-    if [ -f "$DATA/prev" ]; then
-        local prx ptx pts dt drx dtx
-        read -r prx ptx pts < "$DATA/prev"
-        dt=$(( now - pts )); [ "$dt" -ge 1 ] || dt=60
-        drx=$(( (rx - prx) * 8 / dt ))
-        dtx=$(( (tx - ptx) * 8 / dt ))
-        # Counter reset (reboot / interface recreate): clamp to zero.
-        [ "$drx" -ge 0 ] || drx=0
-        [ "$dtx" -ge 0 ] || dtx=0
-        printf '%s %s\n' "$drx" "$dtx" > "$DATA/current"
+# Create the RRDs when missing or when the schema is the old COUNTER one,
+# then backfill the last 24 h of uplink throughput from vnstat. rrdtool
+# refuses updates older than the last one, so the backfill has to happen on
+# a fresh file.
+ensure_rrd() {
+    local current=0 have_vnstat buckets pts t0 cutoff ts rx tx
+    if [ -f "$DATA/uplink.rrd" ] &&
+       rrdtool info "$DATA/uplink.rrd" 2>/dev/null | grep -q 'ds\[rx\].type = "GAUGE"'; then
+        current=1
+        pts=$(rrdtool fetch "$DATA/uplink.rrd" AVERAGE --start -86400 2>/dev/null |
+              grep -vc nan)
+        [ "$pts" -ge 100 ] && return 0     # schema fine, history populated
     fi
-    printf '%s %s %s\n' "$rx" "$tx" "$now" > "$DATA/prev"
+
+    # Rebuilding only pays off if vnstat can actually supply history;
+    # otherwise keep whatever live samples exist (avoid a per-minute rebuild).
+    buckets=$(vnstat_buckets | wc -l)
+    if [ "$buckets" -lt 100 ] && [ "$current" = 1 ]; then
+        return 0
+    fi
+
+    rm -f "$DATA/uplink.rrd" "$DATA/load.rrd" "$DATA/memory.rrd" \
+          "$DATA/prev" "$DATA/seed"
+
+    # --start must be in the past: `create` otherwise starts the file at
+    # "now", and every backfilled update (older than that) is rejected as
+    # "illegal attempt to update using time ...".
+    t0=$(( $(date +%s) - 86400 ))
+    rrdtool create "$DATA/uplink.rrd" --step 60 --start "$t0" \
+        DS:rx:GAUGE:300:0:1000000000000 DS:tx:GAUGE:300:0:1000000000000 \
+        RRA:AVERAGE:0.5:1:1440 RRA:AVERAGE:0.5:30:2688
+    rrdtool create "$DATA/load.rrd" --step 60 --start "$t0" \
+        DS:load1:GAUGE:300:0:100000 DS:load5:GAUGE:300:0:100000 \
+        RRA:AVERAGE:0.5:1:1440 RRA:AVERAGE:0.5:30:2688
+    rrdtool create "$DATA/memory.rrd" --step 60 --start "$t0" \
+        DS:used:GAUGE:300:0:100000000 DS:total:GAUGE:300:0:100000000 \
+        RRA:AVERAGE:0.5:1:1440 RRA:AVERAGE:0.5:30:2688
+
+    cutoff=$(( $(date +%s) - 86400 ))
+    while read -r ts rx tx; do
+        [ -n "$ts" ] || continue
+        [ "$ts" -ge "$cutoff" ] || continue
+        rrdtool update "$DATA/uplink.rrd" \
+            "$ts:$(( rx * 8 / 300 )):$(( tx * 8 / 300 ))"
+        printf '%s %s\n' "$(( rx * 8 / 300 ))" "$(( tx * 8 / 300 ))" > "$DATA/seed"
+    done < <(vnstat_buckets)
+
+    # No history to import: the first live sample then starts the series at zero.
+    [ -s "$DATA/seed" ] || echo "0 0" > "$DATA/seed"
+    return 0
+}
+
+# Headline throughput (bit/s) from the last complete vnstat bucket.
+headline_rate() {
+    local last ts rx tx
+    last=$(vnstat_buckets | tail -1)
+    if [ -n "$last" ]; then
+        set -- $last
+        echo "$(( $2 * 8 / 300 )) $(( $3 * 8 / 300 ))"
+        return
+    fi
+    echo "0 0"
 }
 
 # bit/s -> human string (kbit/Mbit/Gbit)
@@ -65,8 +130,55 @@ except Exception:
 ' "$1" 2>/dev/null || echo "-"
 }
 
+# Start of a chart: the oldest sample actually present in that RRD, capped at
+# 24 h. A fresh deployment therefore shows a zoomed chart with real data
+# rather than a sliver at the right edge of an empty axis.
+chart_start() {
+    local file now s
+    file=$1
+    now=$(date +%s)
+    s=$(rrdtool fetch "$file" AVERAGE --start $(( now - 86400 )) --end "$now" 2>/dev/null |
+        awk 'NR > 2 && !/nan/ { sub(/:/, "", $1); print $1; exit }')
+    if [ -n "$s" ]; then
+        echo $(( s - 60 ))
+    else
+        echo $(( now - 86400 ))
+    fi
+}
+
+# --- commands -----------------------------------------------------------
+
+sample() {
+    ensure_rrd
+    local now rx tx l1 l5 mt ma used drx dtx dt prx ptx pts
+    now=$(date +%s)
+    rx=$(cat "/sys/class/net/$UPLINK/statistics/rx_bytes")
+    tx=$(cat "/sys/class/net/$UPLINK/statistics/tx_bytes")
+    read -r l1 l5 _ < /proc/loadavg || return 1
+    mt=$(( $(awk '/^MemTotal:/{print $2}' /proc/meminfo) / 1024 ))
+    ma=$(( $(awk '/^MemAvailable:/{print $2}' /proc/meminfo) / 1024 ))
+    used=$(( mt - ma ))
+
+    if [ -f "$DATA/prev" ]; then
+        read -r prx ptx pts < "$DATA/prev"
+        dt=$(( now - pts )); [ "$dt" -ge 1 ] || dt=60
+        drx=$(( (rx - prx) * 8 / dt ))
+        dtx=$(( (tx - ptx) * 8 / dt ))
+        [ "$drx" -ge 0 ] || drx=0     # counter reset (reboot / NIC recreate)
+        [ "$dtx" -ge 0 ] || dtx=0
+    else
+        # Seed from the last backfilled bucket so the seam has no zero dip.
+        read -r drx dtx < "$DATA/seed" 2>/dev/null || { drx=0; dtx=0; }
+    fi
+
+    rrdtool update "$DATA/uplink.rrd"  "$now:$drx:$dtx"
+    rrdtool update "$DATA/load.rrd"    "$now:$l1:$l5"
+    rrdtool update "$DATA/memory.rrd"  "$now:$used:$mt"
+    printf '%s %s %s\n' "$rx" "$tx" "$now" > "$DATA/prev"
+}
+
 render() {
-    local l1 l5 l15 cpus mt ma used pct vpn s n crx ctx
+    local rc=0 l1 l5 l15 cpus mt ma used pct vpn s n crx ctx l4
     read -r l1 l5 l15 _ < /proc/loadavg || return 1
     cpus=$(nproc)
     mt=$(( $(awk '/^MemTotal:/{print $2}' /proc/meminfo) / 1024 ))
@@ -82,49 +194,80 @@ render() {
         vpn=$(( vpn + 10#$n ))
     done
 
-    local l4 l6
+    # IPv4 leases only: DHCPv6 is stateless on these gateways (no leases).
     l4=$(leases "$LEASES4")
-    l6=$(leases "$LEASES6")
 
-    crx=0; ctx=0
-    [ -f "$DATA/current" ] && read -r crx ctx < "$DATA/current"
+    read -r crx ctx <<< "$(headline_rate)"
+
+    local start end
+    start=$(chart_start "$DATA/uplink.rrd")
+    end=$(date +%s)
 
     # --- charts (PNG, RRDtool; no client-side scripting involved) ---------
-    rrdtool graph "$ROOT/uplink-24h.png" \
-        --title "Uplink throughput, last 24 h" --vertical-label "Mbit/s" \
-        --start -86400 --width 600 --height 150 --alt-y-grid --units-exponent 6 \
+    # Each chart auto-scales its own axis. Plotting ~0.9 load against a
+    # cores-reference line, or ~700 MiB against an 8 GB total, flattened the
+    # curves into an unreadable sliver; down and up are separate charts
+    # because ~12 kbit/s next to ~35 Mbit/s is invisible on one axis.
+    #
+    # COLOUR ARGUMENTS: write `AREA:rxb#3a9d3a:"legend"`, NOT
+    # `AREA:rxb#"#3a9d3a":"legend"`. In the shell the latter concatenates to
+    # `AREA:rxb##3a9d3a`, RRDtool then silently ignores the series (exit
+    # status still 0), and the chart renders axes plus legend with no data --
+    # which is exactly how these graphs looked empty. The `#` is the
+    # value/colour separator, so the colour is written without a second one.
+    # A bad colour is not reported on stderr, so `|| true` below cannot be
+    # trusted as a correctness check; the playbook verifies the PNG pixels.
+    #
+    # GPRINT accepts LAST, not CURRENT ("ERROR: bad CF for DEF/CDEF: CURRENT").
+    # That error makes the whole graph command exit non-zero, and with the
+    # `|| true` the PNG was silently *not* rewritten -- the page then kept
+    # serving the previous (empty) image. Errors are therefore appended to
+    # $LOG instead of dropped, and the RRD data is already in bit/s (the
+    # sampling step stores a rate), so no extra 8x factor is applied here.
+    rrdtool graph "$ROOT/uplink-down-24h.png" \
+        --title "Uplink downlink, last 24 h" --vertical-label "Mbit/s" \
+        --units-exponent 6 --start "$start" --end "$end" \
+        --width 600 --height 150 --alt-y-grid --lower-limit 0 \
         --color GRID#dddddd --color MGRID#cccccc \
-        DEF:rx=$DATA/uplink.rrd:rx:AVERAGE \
-        DEF:tx=$DATA/uplink.rrd:tx:AVERAGE \
-        CDEF:rxb=rx,8,* CDEF:txb=tx,8,* \
-        AREA:rxb#"#3a9d3a":"down " \
-        LINE1:txb#"#2255cc":"up  " \
-        GPRINT:rxb:AVERAGE:"avg %6.2lf" GPRINT:rxb:MAX:"max %6.2lf\l" \
-        GPRINT:txb:AVERAGE:"avg %6.2lf" GPRINT:txb:MAX:"max %6.2lf\l" \
-        >/dev/null 2>&1 || true
+        DEF:rx="$DATA/uplink.rrd":rx:AVERAGE \
+        AREA:rx#3a9d3a:"down " \
+        GPRINT:rx:AVERAGE:"avg %6.2lf" GPRINT:rx:MAX:"max %6.2lf" \
+        GPRINT:rx:LAST:"now %6.2lf\l" \
+        2>>"$LOG" || rc=1
+
+    rrdtool graph "$ROOT/uplink-up-24h.png" \
+        --title "Uplink uplink, last 24 h" --vertical-label "kbit/s" \
+        --units-exponent 3 --start "$start" --end "$end" \
+        --width 600 --height 150 --alt-y-grid --lower-limit 0 \
+        --color GRID#dddddd --color MGRID#cccccc \
+        DEF:tx="$DATA/uplink.rrd":tx:AVERAGE \
+        AREA:tx#2255cc:"up " \
+        GPRINT:tx:AVERAGE:"avg %6.2lf" GPRINT:tx:MAX:"max %6.2lf" \
+        GPRINT:tx:LAST:"now %6.2lf\l" \
+        2>>"$LOG" || rc=1
 
     rrdtool graph "$ROOT/load-24h.png" \
-        --title "CPU load, last 24 h" --vertical-label "load average" \
-        --start -86400 --width 600 --height 150 --alt-y-grid --lower-limit 0 \
+        --title "CPU load, last 24 h ($cpus cores)" --vertical-label "load average" \
+        --start "$(chart_start "$DATA/load.rrd")" --end "$end" \
+        --width 600 --height 150 --alt-y-grid --lower-limit 0 \
         --color GRID#dddddd --color MGRID#cccccc \
-        DEF:l1=$DATA/load.rrd:load1:AVERAGE \
-        DEF:l5=$DATA/load.rrd:load5:AVERAGE \
-        AREA:l1#"#d97706":"load1" \
-        LINE1:l5#"#7c3aed":"load5" \
-        HRULE:$cpus#"#cc2222":"$cpus cores" \
+        DEF:l1="$DATA/load.rrd":load1:AVERAGE \
+        DEF:l5="$DATA/load.rrd":load5:AVERAGE \
+        AREA:l1#d97706:"load1" \
+        LINE1:l5#7c3aed:"load5" \
         GPRINT:l1:AVERAGE:"avg %6.2lf" GPRINT:l1:MAX:"max %6.2lf\l" \
-        >/dev/null 2>&1 || true
+        2>>"$LOG" || rc=1
 
     rrdtool graph "$ROOT/memory-24h.png" \
-        --title "Memory used, last 24 h" --vertical-label "MiB" \
-        --start -86400 --width 600 --height 150 --alt-y-grid --lower-limit 0 \
+        --title "Memory used, last 24 h (of $mt MiB)" --vertical-label "MiB" \
+        --start "$(chart_start "$DATA/memory.rrd")" --end "$end" \
+        --width 600 --height 150 --alt-y-grid --lower-limit 0 \
         --color GRID#dddddd --color MGRID#cccccc \
-        DEF:used=$DATA/memory.rrd:used:AVERAGE \
-        DEF:total=$DATA/memory.rrd:total:AVERAGE \
-        AREA:used#"#0e7490":"used" \
-        LINE1:total#"#999999":"total" \
-        GPRINT:used:AVERAGE:"avg %6.0lf" GPRINT:used:MAX:"max %6.0lf\l" \
-        >/dev/null 2>&1 || true
+        DEF:used="$DATA/memory.rrd":used:AVERAGE \
+        AREA:used#0e7490:"used" \
+        GPRINT:used:AVERAGE:"avg %6.0lf" GPRINT:used:MAX:"max %6.0lf" \
+        GPRINT:used:LAST:"now %6.0lf\l" \
+        2>>"$LOG" || rc=1
 
     # --- the page ----------------------------------------------------------
     cat > "$ROOT/index.html" <<EOF
@@ -153,32 +296,46 @@ a     { color: #2255cc; text-decoration: none; }
 <table>
 <tr><td>CPU load (1 / 5 / 15 min, $cpus cores)</td><td class="v">$l1 / $l5 / $l15</td></tr>
 <tr><td>Memory used / total</td><td class="v">$used MiB / $mt MiB ($pct%)</td></tr>
-<tr><td>Uplink throughput (last sample)</td><td class="v">down $(human "$crx") &middot; up $(human "$ctx")</td></tr>
+<tr><td>Uplink throughput (last 5 min)</td><td class="v">down $(human "$crx") &middot; up $(human "$ctx")</td></tr>
 <tr><td>VPN connections (fastd, all instances)</td><td class="v">$vpn</td></tr>
-<tr><td>DHCP leases (v4 / v6)</td><td class="v">$l4 / $l6</td></tr>
+<tr><td>DHCP leases (v4)</td><td class="v">$l4</td></tr>
 </table>
-<img src="uplink-24h.png" width="600" height="150" alt="uplink throughput, last 24 hours">
-<img src="load-24h.png"    width="600" height="150" alt="CPU load, last 24 hours">
-<img src="memory-24h.png"  width="600" height="150" alt="memory used, last 24 hours">
+<img src="uplink-down-24h.png" width="600" height="150" alt="uplink downlink, last 24 hours">
+<img src="uplink-up-24h.png"   width="600" height="150" alt="uplink uplink, last 24 hours">
+<img src="load-24h.png"        width="600" height="150" alt="CPU load, last 24 hours">
+<img src="memory-24h.png"      width="600" height="150" alt="memory used, last 24 hours">
 <p class="foot">
 Generated $(date -u '+%Y-%m-%d %H:%M:%S UTC') &mdash; this page reloads
-every $(( REFRESH / 60 )) minutes; charts cover the last 24 hours.<br>
+every $(( REFRESH / 60 )) minutes; charts cover up to the last 24 hours
+(they start at the oldest sample available). Headline throughput is the
+last complete vnstat 5-minute bucket.<br>
 Reachable from the mesh at:
 {% for r in served_regions %}<a href="http://{{ r.v4_host }}:{{ status_web_port }}/">{{ r.id }}</a>{{ " " }}
 {%- endfor %}<br>
 IPv6:
 {% for r in served_regions %}<a href="http://[{{ r.v6_host }}]:{{ status_web_port }}/">[{{ r.v6_host }}]</a>{{ " " }}
-{%- endfor %}
+{%- endfor %}<br>
+Inter-gateway (intra-as):
+<a href="http://{{ status_web_intra_v4 }}:{{ status_web_port }}/">[v4]</a>
+<a href="http://[{{ status_web_intra_v6 }}]:{{ status_web_port }}/">[v6]</a>
 </p>
 </body>
 </html>
 EOF
     chmod 644 "$ROOT/index.html"
+    # Drop the chart from the earlier layout so it does not linger.
+    rm -f "$ROOT/uplink-24h.png"
+    return $rc
 }
 
 case "${1:-all}" in
     sample) sample ;;
     render) render ;;
     all)    sample; render ;;
-    *) echo "usage: $0 {sample|render|all}" >&2; exit 2 ;;
+    backfill)
+        rm -f "$DATA/uplink.rrd" "$DATA/load.rrd" "$DATA/memory.rrd" \
+              "$DATA/prev" "$DATA/seed"
+        ensure_rrd
+        ;;
+    *) echo "usage: $0 {sample|render|all|backfill}" >&2; exit 2 ;;
 esac

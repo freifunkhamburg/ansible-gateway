@@ -3,6 +3,12 @@
 # The mesh aggregate and the per-region /64 guards come from inventory;
 # port ranges and the MSS clamp are policy. teredo/6to4 fastd-port drops are
 # protocol policy. IPv6 conntrack is not used on these gateways (raw NOTRACK).
+#
+# Status page (tcp/80): served on the region (mesh) addresses and on the
+# gateway's own intra-as address. The region /64s are announced upstream, so
+# the page is deliberately reachable from the public internet on its mesh
+# IPv6 addresses, e.g. http://[2a03:2267:1::50]/; tcp/80 to any other
+# destination is dropped.
 
 *raw
 :PREROUTING ACCEPT [0:0]
@@ -21,7 +27,12 @@ COMMIT
 -A INPUT -s {{ mesh_v6_aggregate }} -p udp -m udp --dport 5000:5010 -j ACCEPT
 -A INPUT -p udp -m udp --dport 5000:5010 -j DROP
 -A INPUT -p tcp -m tcp --dport 161 -j DROP
--A INPUT -p tcp -m tcp --dport 80 ! -s {{ mesh_v6_aggregate }} -m comment --comment "status page: mesh only" -j DROP
+-A INPUT -i lo -p tcp -m tcp --dport 80 -m comment --comment "status page: local health checks" -j ACCEPT
+-A INPUT -i {{ intra_as_if }} -p tcp -m tcp --dport 80 -m comment --comment "status page: intra-as peers" -j ACCEPT
+{% for r in served_regions %}
+-A INPUT -d {{ r.v6_host }} -p tcp -m tcp --dport 80 -m comment --comment "status page: public, mesh address {{ r.id }}" -j ACCEPT
+{% endfor %}
+-A INPUT -p tcp -m tcp --dport 80 -m comment --comment "status page: not a listener" -j DROP
 -A INPUT ! -s {{ mesh_v6_aggregate }} -p udp -m udp --dport 123 -m recent --set --name NTPTRAFFIC --mask ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff --rsource
 -A INPUT ! -s {{ mesh_v6_aggregate }} -p udp -m udp --dport 123 -m recent --update --seconds 30 --hitcount 20 --name NTPTRAFFIC --mask ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff --rsource -j DROP
 -A INPUT -p udp -m udp --dport 123 -j ACCEPT

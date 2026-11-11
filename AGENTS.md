@@ -48,11 +48,14 @@ change gateway state is merged only after it has run against the live host:
    and all `fastd@*` instances — plus a targeted probe (`mesh-client-check`,
    `dig`, `birdc`).
 4. Record the outcome in the commit trailer `Tested-on: gw05 (…)`.
-
-Then merge the branch into `main` as one commit (`git merge --squash`, branch
-may be deleted afterwards) and push `origin main`. Re-run `main` on gw05
-afterwards and require `changed=0`: that proves the merged commit is exactly
-the tested state.
+5. **Ask the operator for confirmation before merging into `main` and wait
+   for it explicitly.** The operator may want to run their own tests against
+   gw05 first. Never merge or push a state-changing branch to `main`
+   without that go-ahead in this conversation.
+6. Only after confirmation: merge the branch into `main` as one commit
+   (`git merge --squash`, branch may be deleted afterwards) and push
+   `origin main`. Re-run `main` on gw05 afterwards and require `changed=0`:
+   that proves the merged commit is exactly the tested state.
 
 `--check --diff` alone is not the gate: check mode creates no directories and
 starts no services, so it hides ordering and permission bugs.

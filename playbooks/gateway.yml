@@ -40,3 +40,43 @@
                     # must be live before status_web verifies through them
     - status_web    # static status page (lighttpd + RRD); verifies over the
                     # mesh and intra-as addresses via the live ruleset
+
+  tasks:
+    # roles/firewall arms a revert guard before it restores the new ruleset:
+    # if nothing confirms the change within fw_guard_seconds, it restores the
+    # snapshot taken before the render. The confirmation is a *fresh* SSH
+    # connection from the controller — no ControlMaster reuse, so it proves the
+    # live ruleset really accepts sshd. Only then is the guard disarmed.
+    # If this task fails, the guard stays armed and reverts on its own.
+    - name: Prove a fresh SSH connection to the gateway still works
+      ansible.builtin.command:
+        argv:
+          - ssh
+          - -o
+          - BatchMode=yes
+          - -o
+          - ControlMaster=no
+          - -o
+          - ControlPath=none
+          - -o
+          - ConnectTimeout=10
+          - -i
+          - "{{ ansible_ssh_private_key_file }}"
+          - "{{ ansible_user }}@{{ ansible_host }}"
+          - "true"
+      delegate_to: localhost
+      become: false
+      register: fw_fresh_ssh
+      changed_when: false
+      when: fw_guard_active | default(false)
+
+    - name: Disarm the firewall revert guard
+      ansible.builtin.shell: |
+        set -eu
+        systemctl stop {{ fw_guard_unit }}.timer {{ fw_guard_unit }}.service 2>/dev/null || true
+        systemctl reset-failed {{ fw_guard_unit }}.timer {{ fw_guard_unit }}.service 2>/dev/null || true
+        logger -t ffhh-fw-guard -- "disarmed: fresh SSH connection confirmed"
+      changed_when: false
+      when:
+        - fw_guard_active | default(false)
+        - fw_fresh_ssh.rc | default(1) == 0

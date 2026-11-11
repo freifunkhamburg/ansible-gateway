@@ -185,11 +185,20 @@
     enabled: true
 
 # --- brute-force protection -------------------------------------------------
-- name: Enable fail2ban for sshd
+- name: Enable fail2ban for sshd (v4 and v6)
   ansible.builtin.copy:
     content: |
       [sshd]
       enabled = true
+      # fail2ban 1.1.0's iptables-multiport action carries an [Init?family=inet6]
+      # section, so it installs f2b-sshd and its INPUT jump in both tables and
+      # picks the family from the banned address. It would do that only at the
+      # first ban (actionstart_on_demand auto-detects the conditional section),
+      # which would leave the jump missing after the firewall's iptables-restore
+      # until an attack happens. Forcing actionstart on start makes the chain
+      # and jump exist from boot; the firewall role restarts fail2ban after
+      # every restore for the same reason.
+      action = iptables-multiport[name=sshd, port="ssh", actionstart_on_demand=false]
     dest: "{{ fail2ban_jail }}"
     owner: root
     group: root

@@ -1,7 +1,13 @@
 ---
 # iptables (nft-backed) + iptables-persistent, same rule language as the
 # reference gateways. Files render to the persistent locations, so
-# netfilter-persistent picks them up at boot; the live restore is opt-in.
+# netfilter-persistent picks them up at boot; the live restore happens in
+# this run and only when the rendered ruleset changed.
+#
+# The restore is guarded by a revert timer: if the run cannot prove a fresh
+# SSH connection afterwards, the pre-change ruleset is restored automatically
+# (see fw-revert-guard.sh.j2).
+
 - name: Preseed iptables-persistent (do not prompt to save on install)
   ansible.builtin.copy:
     content: |
@@ -34,6 +40,75 @@
     group: root
     mode: "0755"
 
+# --- lockout guard ------------------------------------------------------
+# The restore replaces the running ruleset, so the source address of the
+# control connection must be admitted by the allowlist that is about to be
+# installed. This is checked against the rendered inputs, before anything is
+# applied; a failure stops the run with the old ruleset still live.
+- name: Read the source address of the control connection
+  ansible.builtin.set_fact:
+    fw_control_source: >-
+      {{ ansible_env.SSH_CONNECTION.split(' ')[0]
+         if ansible_env.SSH_CONNECTION is defined else '' }}
+
+- name: Check the control connection against the SSH allowlist
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import ipaddress, sys
+        src = sys.argv[1]
+        if not src:
+            sys.exit(0)
+        nets = [ipaddress.ip_network(n, strict=False)
+                for n in sys.argv[2].split(',') if n.strip()]
+        sys.exit(0 if any(ipaddress.ip_address(src) in n for n in nets) else 1)
+      - "{{ fw_control_source }}"
+      - "{{ (gw_ssh_allowlist6 if ':' in fw_control_source else gw_ssh_allowlist) | join(',') }}"
+  register: fw_control_ok
+  changed_when: false
+  failed_when: false
+
+- name: Refuse to install a ruleset that would drop the control connection
+  ansible.builtin.assert:
+    that:
+      - fw_control_ok.rc == 0
+    fail_msg: >-
+      The control connection comes from {{ fw_control_source | default('') }},
+      which the allowlist about to be installed does not admit. Add that
+      prefix to gw_ssh_allowlist (IPv4) or gw_ssh_allowlist6 (IPv6) first;
+      nothing has been applied.
+
+# --- snapshot + revert guard --------------------------------------------
+# Taken from the *live* state, not from the rendered files: the live ruleset is
+# what is actually protecting the host, and the snapshot is exactly what the
+# guard restores. The persistent files are rewritten by the guard from the
+# same snapshot, so a reboot cannot resurrect the unconfirmed change.
+- name: Ensure the guard state directory exists
+  ansible.builtin.file:
+    path: "{{ fw_guard_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Snapshot the current live rulesets
+  ansible.builtin.shell: |
+    set -eu
+    /usr/sbin/iptables-save  > {{ fw_guard_dir }}/live.v4
+    /usr/sbin/ip6tables-save > {{ fw_guard_dir }}/live.v6
+  changed_when: false
+
+- name: Render the revert guard
+  ansible.builtin.template:
+    src: fw-revert-guard.sh.j2
+    dest: "{{ fw_guard_script }}"
+    owner: root
+    group: root
+    mode: "0700"
+
+# --- render ------------------------------------------------------------
 - name: Render the persistent IPv4 ruleset
   ansible.builtin.template:
     src: rules.v4.j2
@@ -54,6 +129,27 @@
     validate: "/usr/sbin/ip6tables-restore --test %s"
   register: rules_v6
 
+# --- arm the guard ------------------------------------------------------
+# Armed only when the restore will actually happen. A stale unit from an
+# aborted earlier run is cleared first so the window starts now.
+- name: Arm the revert guard
+  ansible.builtin.shell: |
+    set -eu
+    systemctl stop {{ fw_guard_unit }}.timer {{ fw_guard_unit }}.service 2>/dev/null || true
+    systemctl reset-failed {{ fw_guard_unit }}.timer {{ fw_guard_unit }}.service 2>/dev/null || true
+    /usr/bin/systemd-run --quiet --unit={{ fw_guard_unit }} \
+      --description="ffhh firewall revert guard" \
+      --on-active={{ fw_guard_seconds }} "{{ fw_guard_script }}"
+    logger -t ffhh-fw-guard -- "armed: reverting to the snapshot in {{ fw_guard_seconds }}s unless confirmed"
+  when: rules_v4.changed or rules_v6.changed
+  changed_when: true
+
+- name: Remember that the guard is armed
+  ansible.builtin.set_fact:
+    fw_guard_active: true
+  when: rules_v4.changed or rules_v6.changed
+
+# --- apply -------------------------------------------------------------
 - name: Restore the IPv4 ruleset
   ansible.builtin.shell: /usr/sbin/iptables-restore < /etc/iptables/rules.v4
   when: rules_v4.changed
@@ -63,3 +159,66 @@
   ansible.builtin.shell: /usr/sbin/ip6tables-restore < /etc/iptables/rules.v6
   when: rules_v6.changed
   changed_when: true
+
+# iptables-restore flushes every custom chain, including fail2ban's, and the
+# jump fail2ban installed is gone with it. Restarting the daemon is what
+# re-creates f2b-sshd and its INPUT jumps (both families) against the new
+# ruleset — without it fail2ban is present but unable to ban anyone.
+- name: Restart fail2ban so it re-inserts its chains into the fresh ruleset
+  ansible.builtin.systemd_service:
+    name: fail2ban.service
+    state: restarted
+  when: rules_v4.changed or rules_v6.changed
+
+# --- verify the live state ---------------------------------------------
+# fail2ban installs its jump asynchronously after the restart; wait for it
+# instead of racing the assertion below.
+- name: Wait for fail2ban to re-insert its chains (IPv4)
+  ansible.builtin.command: /usr/sbin/iptables -S INPUT
+  register: fw_f2b_v4
+  until: "'f2b-sshd' in fw_f2b_v4.stdout"
+  retries: 20
+  delay: 1
+  changed_when: false
+
+- name: Wait for fail2ban to re-insert its chains (IPv6)
+  ansible.builtin.command: /usr/sbin/ip6tables -S INPUT
+  register: fw_f2b_v6
+  until: "'f2b-sshd' in fw_f2b_v6.stdout"
+  retries: 20
+  delay: 1
+  changed_when: false
+
+- name: Read the live IPv4 ruleset
+  ansible.builtin.command: /usr/sbin/iptables -S
+  register: fw_live_v4
+  changed_when: false
+
+- name: Read the live IPv6 ruleset
+  ansible.builtin.command: /usr/sbin/ip6tables -S
+  register: fw_live_v6
+  changed_when: false
+
+# sshd must be *admitted*, not merely jumped to. A chain that returns for
+# allowed sources and an ACCEPT policy was harmless; with DROP it silently
+# closes sshd. There has to be a tcp/22 ACCEPT rule in both families.
+- name: Check that the live rulesets admit tcp/22
+  ansible.builtin.shell: |
+    set -eu
+    iptables -S INPUT | grep -q -- '--dport 22 -j ACCEPT' &&
+    ip6tables -S INPUT | grep -q -- '--dport 22 -j ACCEPT'
+  register: fw_ssh_accept
+  changed_when: false
+  failed_when: false
+
+- name: Assert the live rulesets are default-deny and admit SSH
+  ansible.builtin.assert:
+    that:
+      - "'-P INPUT DROP' in fw_live_v4.stdout"
+      - "'-P FORWARD DROP' in fw_live_v4.stdout"
+      - "'-P INPUT DROP' in fw_live_v6.stdout"
+      - "'-P FORWARD DROP' in fw_live_v6.stdout"
+      - "fw_ssh_accept.rc == 0"
+      - "'f2b-sshd' in fw_live_v4.stdout"
+      - "'f2b-sshd' in fw_live_v6.stdout"
+    fail_msg: "the live ruleset does not admit SSH; the revert guard will restore the snapshot"

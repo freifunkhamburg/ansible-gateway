@@ -18,7 +18,7 @@ with non-obvious behaviour.
 | `bird` | BIRD 3 package, `bird.conf` (OSPF, BGP, static natips routes, RADV), config validation, reload handler | `bird.conf.j2` | derived peers/prefixes, `mesh_forward_hosts` |
 | `services` | Resolver and time backends, package set, `resolv.conf`, vnstat, fail2ban, staged-config guard | `unbound.conf.j2`, `chrony.conf.j2`, `ntpsec.conf.j2`, `resolv.conf.j2` | `dns_backend`, `ntp_backend`, `ntp_upstream_servers`, `fail2ban_*` |
 | `powerdns` | Authoritative PowerDNS (Lua2 backend) on `127.0.0.2`, the `ffhh-dns-fetch` script + timer, the synthesized zone Lua | `pdns.conf.j2`, `ffhh-synth.lua.j2`, `ffhh-dns-fetch.*` | `ffhh_dns_enabled`, `ffhh_dns_authoritative_v4/_v6`, `ffhh_dns_axfr_*`, `served_regions` |
-| `knot` | `knot-resolver` user/workdir, `kresd.conf`, unit, start + probes; **meta dependency** on `knot_build` | `kresd.conf.j2`, unit template | `served_regions`, `unbound_access_control`, `ffhh_dns_*` |
+| `knot` | `knot-resolver` user/workdir, `kresd.conf`, unit, start + probes; **meta dependency** on `knot_build`. The rendered ACL is mesh-clients-only (it REFUSEs every other source) | `kresd.conf.j2`, unit template | `served_regions`, `unbound_access_control`, `ffhh_dns_*` |
 | `knot_build` | Builds the newest Knot Resolver from source into `/usr/local`, purges the distro package | `tasks/build.yml` | `knot_tag` (empty = newest) |
 | `knot_test` | Optional comparison instance on port 5353 (`playbooks/gateway-knot-test.yml`); not part of the client path | `kresd-test.conf.j2`, `kresd-test.service.j2`, `regions.json.j2` | `knot_test_*` |
 | `fastd` | Builds the newest fastd, renders `common.conf` + one config/secret per instance, persists and attaches TAPs, starts units | `common.conf.j2`, `fastd.conf.j2`, `secret.conf.j2`, `fastd@.service.j2` | vault secrets, `fastd_peers`, `fastd_key_scope`, derived instances |
@@ -26,7 +26,7 @@ with non-obvious behaviour.
 | `operations` | Health and operator scripts, cron jobs, vnstat interface policy, motd | `check-gateway.j2`, `check.sh.j2`, `check-sanitized.sh.j2`, `motd-refresh.j2`, `batman-health-report.j2`, `upstream-versions-report.j2`, `update-fastd-keys.j2`, `cron/*.j2` | `gw_check_*`, `mesh_forward_hosts`, paths from `group_vars` |
 | `mesh_announce` | mesh-announce (renamed respondd) checkout at the pinned commit, single `respondd.conf`, unit, domain verification | `respondd.conf.j2`, unit template | `gw_regions` + region `gluon_domain`, `mesh_announce_commit` |
 | `status_web` | static status page on the mesh and intra-as addresses (lighttpd + RRD, no JS), minute sampling + 5-minute render cron; runs after `firewall` because its verification goes through the live ruleset | see `docs/status-web.md` | `status_web_*`, `served_regions`, `intra_as_*` |
-| `firewall` | netfilter packages, rendered persistent `rules.v4`/`rules.v6`, restore-on-change | `rules.v4.j2`, `rules.v6.j2` | `gw_ssh_allowlist`, derived addresses/NAT |
+| `firewall` | netfilter packages, rendered persistent `rules.v4`/`rules.v6`; default-deny `INPUT`/`FORWARD`, per-listener rules, lockout guard, revert guard (snapshot + transient timer, disarmed by a fresh SSH probe at the end of the play), fail2ban re-insertion and post-restore assertions | `rules.v4.j2`, `rules.v6.j2` | `gw_ssh_allowlist`, `gw_ssh_allowlist6`, mesh/peer aggregates, `freifunk_v6_aggregates`, derived addresses/NAT |
 
 ## Gating
 

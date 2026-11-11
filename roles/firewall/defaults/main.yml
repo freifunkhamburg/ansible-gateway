@@ -1,5 +1,27 @@
 ---
 # Netfilter for the Debian 13 gateway. The ruleset is rendered to the
 # persistent locations and restored live whenever the rendered ruleset
-# changed, so a fresh host is firewalled in the same run. The SSH allowlist
-# from host_vars must contain the operator/control paths before applying.
+# changed, so a fresh host is firewalled in the same run.
+#
+# Both families are default-deny: INPUT/FORWARD are DROP and every listener
+# has a named rule. Applying the ruleset therefore replaces the running one,
+# so the role checks — before restoring — that the source address of the
+# control connection is still in the allowlist it is about to install.
+#
+# SSH allowlist inputs come from host_vars:
+#   gw_ssh_allowlist   IPv4 prefixes admitted to sshd
+#   gw_ssh_allowlist6  extra IPv6 prefixes admitted to sshd; the mesh
+#                      aggregate (which contains the intra-as addresses) is
+#                      always admitted
+gw_ssh_allowlist6: []
+
+# --- revert guard (dead-man switch) -------------------------------------
+# Before the ruleset is restored, the current live state is snapshotted and a
+# transient timer is armed. If the run does not confirm the change within
+# fw_guard_seconds (playbooks/gateway.yml proves a fresh SSH connection at the
+# end of the play), the timer fires and puts the snapshot back. This is what
+# makes a lockout recoverable without console access.
+fw_guard_dir: /var/lib/ffhh-fw-guard
+fw_guard_unit: ffhh-fw-guard
+fw_guard_script: /usr/local/sbin/ffhh-fw-revert-guard
+fw_guard_seconds: 300

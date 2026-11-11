@@ -1,10 +1,14 @@
 # Netfilter rules for {{ ffhh_host_name }} (Debian 13 base).
 #
+# Default-deny: INPUT and FORWARD start at DROP and every listener is named
+# explicitly. Established flows are accepted by conntrack before the per-port
+# rules; the raw table keeps the tunnel and VXLAN data plane out of conntrack
+# altogether.
+#
 # Gateway identity (public block, SNAT range, transit net, SSH allowlist)
-# comes from host_vars; published service /32s come from the shared
-# mesh_forward_hosts list, and the transit network is derived from
-# uplink_v4. Port ranges, MSS clamps, kernel table numbers and the fwmark
-# value are policy and stay literal.
+# comes from host_vars; the mesh aggregate and the forwarded community /32s
+# come from group_vars. Port ranges, MSS clamp, fwmark, hashlimit rates and
+# the log prefix are policy and stay literal.
 
 *mangle
 :PREROUTING ACCEPT [0:0]
@@ -13,38 +17,107 @@
 :OUTPUT ACCEPT [0:0]
 :POSTROUTING ACCEPT [0:0]
 -A PREROUTING -i {{ uplink_if }} -j MARK --set-xmark 0x1/0xffffffff
--A PREROUTING -i bat-* -j MARK --set-xmark 0x1/0xffffffff
+-A PREROUTING -i bat-+ -j MARK --set-xmark 0x1/0xffffffff
 COMMIT
 
 *filter
-:INPUT ACCEPT [0:0]
-:FORWARD ACCEPT [0:0]
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
 :OUTPUT ACCEPT [0:0]
-:f2b-sshd - [0:0]
-:ssh-filter - [0:0]
--A INPUT -p tcp -m tcp --dport 22 -j ssh-filter
--A INPUT -s 127.0.0.0/8 -i lo -j ACCEPT
+
+# --- fast path ---------------------------------------------------------
+# Tunnel/VXLAN flows are NOTRACKed above, so they arrive as NEW and are
+# matched by their own rules below. Everything else is tracked.
+-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# --- OSPFv2: uplink transit + bat interfaces --------------------------
+# BIRD runs OSPFv2 on the uplink (transit /29, Hellos to 224.0.0.5) and on
+# the bat interfaces (mesh addresses). It is multicast and non-stateful, so
+# it is admitted *before* the conntrack INVALID check: multicast/broadcast
+# packets can otherwise be classified INVALID and dropped. Matching by
+# interface is what makes the uplink case work — the neighbour speaks from a
+# link address, not from the mesh aggregate.
+-A INPUT -i {{ uplink_if }} -p ospf -j ACCEPT
+-A INPUT -s {{ mesh_v4_aggregate }} -p ospf -j ACCEPT
+-A INPUT -p ospf -j DROP
+
+-A INPUT -m conntrack --ctstate INVALID -j DROP
+-A INPUT -i lo -j ACCEPT
+
+# --- ICMP: signalling allowed, echo request rate-limited per source ----
+-A INPUT -p icmp -m icmp --icmp-type 0 -j ACCEPT
+-A INPUT -p icmp -m icmp --icmp-type 3 -j ACCEPT
+-A INPUT -p icmp -m icmp --icmp-type 11 -j ACCEPT
+-A INPUT -p icmp -m icmp --icmp-type 12 -j ACCEPT
+-A INPUT -p icmp -m icmp --icmp-type 8 -m hashlimit --hashlimit-name fw-icmp --hashlimit-upto 5/second --hashlimit-burst 10 --hashlimit-mode srcip -j ACCEPT
+-A INPUT -p icmp -j DROP
+
+# --- SSH: operator allowlist; everything else is rejected --------------
+# One ACCEPT rule per prefix, then LOG + REJECT. Deliberately not a user chain:
+# a chain that returns for allowed sources falls back into INPUT and ends at the
+# DROP policy, which is how the first version of this ruleset locked out SSH.
+{% for n in gw_ssh_allowlist %}
+-A INPUT -p tcp -m tcp --dport 22 -s {{ n }} -j ACCEPT
+{% endfor %}
+-A INPUT -p tcp -m tcp --dport 22 -m limit --limit 5/min -j LOG --log-prefix "{{ ffhh_host_name }} ssh-reject: " --log-level 4
+-A INPUT -p tcp -m tcp --dport 22 -j REJECT --reject-with icmp-port-unreachable
+
+# --- DHCPv4 server -----------------------------------------------------
+# A client without a lease sends DISCOVER from 0.0.0.0; RENEW/REQUEST come
+# from the leased mesh address.
+-A INPUT -p udp -m udp --dport 67 -s 0.0.0.0/32 -j ACCEPT
+-A INPUT -s {{ mesh_v4_aggregate }} -p udp -m udp --dport 67 -j ACCEPT
+-A INPUT -p udp -m udp --dport 67 -j DROP
+
+# --- Client resolver (kresd): mesh clients only ------------------------
+-A INPUT -s {{ mesh_v4_aggregate }} -p udp -m udp --dport 53 -j ACCEPT
+-A INPUT -s {{ mesh_v4_aggregate }} -p tcp -m tcp --dport 53 -j ACCEPT
+-A INPUT -p udp -m udp --dport 53 -j DROP
+-A INPUT -p tcp -m tcp --dport 53 -j DROP
+
+# --- fastd tunnels: public, but not from the mesh or the intra-as /24 ---
 -A INPUT -s {{ mesh_v4_aggregate }} -p udp -m udp --dport 10000:10010 -j DROP
 -A INPUT -s {{ gw_public_net }} -p udp -m udp --dport 10000:10010 -j DROP
 -A INPUT -p udp -m udp --dport 10000:10010 -j ACCEPT
--A INPUT -p udp -m udp --dport 123 -m recent --set --name NTPTRAFFIC --mask 255.255.255.255 --rsource
--A INPUT -p udp -m udp --dport 123 -m recent --update --seconds 30 --hitcount 20 --name NTPTRAFFIC --mask 255.255.255.255 --rsource -j DROP
--A INPUT -p udp -m udp --dport 123 -j ACCEPT
--A INPUT -p udp -m udp --dport 5000:5010 -j DROP
+
+# --- VXLAN: intra-as segment only --------------------------------------
+-A INPUT -i {{ intra_as_if }} -p udp -m udp --dport 4789 -j ACCEPT
+-A INPUT -p udp -m udp --dport 4789 -j DROP
+
+# --- respondd: mesh clients only ---------------------------------------
+-A INPUT -s {{ mesh_v4_aggregate }} -p udp -m udp --dport 1001 -j ACCEPT
+-A INPUT -p udp -m udp --dport 1001 -j DROP
+
+# --- NTP: public, rate-limited per source ------------------------------
+-A INPUT -p udp -m udp --dport 123 -m hashlimit --hashlimit-name fw-ntp --hashlimit-upto 20/second --hashlimit-burst 40 --hashlimit-mode srcip -j ACCEPT
+-A INPUT -p udp -m udp --dport 123 -j DROP
+
+# --- status page -------------------------------------------------------
 -A INPUT -i lo -p tcp -m tcp --dport 80 -m comment --comment "status page: local health checks" -j ACCEPT
 -A INPUT -i {{ intra_as_if }} -p tcp -m tcp --dport 80 -m comment --comment "status page: intra-as peers" -j ACCEPT
--A INPUT -p tcp -m tcp --dport 80 ! -s {{ mesh_v4_aggregate }} -m comment --comment "status page: mesh only" -j DROP
+-A INPUT -s {{ mesh_v4_aggregate }} -p tcp -m tcp --dport 80 -m comment --comment "status page: mesh clients" -j ACCEPT
+-A INPUT -p tcp -m tcp --dport 80 -m comment --comment "status page: not a listener" -j DROP
+
+# --- non-listening ports ----------------------------------------------
+-A INPUT -p udp -m udp --dport 5000:5010 -j DROP
+-A INPUT -p tcp -m tcp --dport 161 -j DROP
 -A INPUT -p tcp -m tcp --dport 9000:9999 -j DROP
-{% for h in mesh_forward_hosts %}
--A FORWARD -d {{ h.dest }} -i {{ uplink_if }} -j ACCEPT
--A FORWARD -s {{ h.dest }} -o {{ uplink_if }} -j ACCEPT
-{% endfor %}
--A FORWARD ! -s {{ mesh_v4_aggregate }} -o {{ uplink_if }} -j DROP
+
+# --- anything else: visible, not silent -------------------------------
+-A INPUT -m limit --limit 5/min -j LOG --log-prefix "{{ ffhh_host_name }} input-drop: " --log-level 4
+
+# --- forwarding -------------------------------------------------------
+-A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+-A FORWARD -m conntrack --ctstate INVALID -j DROP
+# The clamp must run before the ACCEPT rules: TCPMSS is non-terminating, an
+# ACCEPT would end the traversal and leave new connections unclamped.
 -A FORWARD -o {{ uplink_if }} -p tcp -m tcp --tcp-flags SYN,RST SYN -m tcpmss ! --mss 0:1240 -j TCPMSS --set-mss 1240
-{% for n in gw_ssh_allowlist %}
--A ssh-filter -s {{ n }} -j RETURN
+-A FORWARD ! -s {{ mesh_v4_aggregate }} -o {{ uplink_if }} -j DROP
+-A FORWARD -s {{ mesh_v4_aggregate }} -o {{ uplink_if }} -j ACCEPT
+{% for h in mesh_forward_hosts %}
+-A FORWARD -d {{ h.dest }} -i {{ uplink_if }} -o bat-+ -j ACCEPT
 {% endfor %}
--A ssh-filter -j REJECT --reject-with icmp-port-unreachable
+-A FORWARD -m limit --limit 5/min -j LOG --log-prefix "{{ ffhh_host_name }} forward-drop: " --log-level 4
 COMMIT
 
 *nat

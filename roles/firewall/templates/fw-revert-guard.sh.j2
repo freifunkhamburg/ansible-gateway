@@ -1,0 +1,32 @@
+#!/bin/bash
+# Dead-man switch for firewall changes (roles/firewall).
+#
+# Armed by the playbook immediately before the new ruleset is restored, and
+# disarmed only after the run has proved that a *fresh* SSH connection to the
+# gateway still works. If the run dies, or nothing confirms it within the
+# window, the pre-change ruleset is put back unchanged.
+set -u
+
+dir="{{ fw_guard_dir }}"
+
+log() { logger -t ffhh-fw-guard -- "$*"; }
+
+if [ ! -f "$dir/live.v4" ] || [ ! -f "$dir/live.v6" ]; then
+  log "no snapshot in $dir; nothing to revert"
+  exit 0
+fi
+
+log "revert window elapsed without confirmation; restoring the pre-change ruleset"
+
+/usr/sbin/iptables-restore  < "$dir/live.v4" || log "v4 restore failed"
+/usr/sbin/ip6tables-restore < "$dir/live.v6" || log "v6 restore failed"
+
+# Keep the boot-time ruleset in step with what is now running; otherwise a
+# reboot would re-apply the unconfirmed change from /etc/iptables.
+install -m 0640 -o root -g root "$dir/live.v4" /etc/iptables/rules.v4
+install -m 0640 -o root -g root "$dir/live.v6" /etc/iptables/rules.v6
+
+# iptables-restore flushed fail2ban's chains; re-insert them.
+systemctl restart fail2ban.service || log "fail2ban restart failed"
+
+log "reverted to the pre-change ruleset"

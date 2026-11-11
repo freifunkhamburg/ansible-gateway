@@ -1,51 +1,24 @@
 # Netfilter rules for {{ ffhh_host_name }} (Debian 13 base), IPv6.
 #
-# The mesh aggregate and the per-region /64 guards come from inventory;
-# port ranges and the MSS clamp are policy. teredo/6to4 fastd-port drops are
-# protocol policy. IPv6 conntrack is not used on these gateways (raw NOTRACK).
+# Default-deny: INPUT and FORWARD start at DROP and every listener is named
+# explicitly. Established flows are accepted by conntrack before the per-port
+# rules. The raw table now NOTRACKs only the tunnel/VXLAN data plane (it used
+# to NOTRACK everything, which made a default-deny policy impossible because
+# no flow could ever be seen as ESTABLISHED).
 #
-# Status page (tcp/80): served on the region (mesh) addresses and on the
-# gateway's own intra-as address. The region /64s are announced upstream, so
-# the page is deliberately reachable from the public internet on its mesh
-# IPv6 addresses, e.g. http://[2a03:2267:1::50]/; tcp/80 to any other
-# destination is dropped.
-
-*raw
-:PREROUTING ACCEPT [0:0]
-:OUTPUT ACCEPT [0:0]
--A PREROUTING -j CT --notrack
--A OUTPUT -j CT --notrack
-COMMIT
-
-*filter
-:INPUT ACCEPT [0:0]
-:FORWARD ACCEPT [0:0]
-:OUTPUT ACCEPT [0:0]
--A INPUT -s {{ mesh_v6_aggregate }} -p udp -m udp --dport 10000:10010 -j DROP
--A INPUT -s 2001::/32 -p udp -m udp --dport 10000:10010 -m comment --comment "no fastd via teredo" -j DROP
--A INPUT -s 2002::/16 -p udp -m udp --dport 10000:10010 -m comment --comment "no fastd via 6to4" -j DROP
--A INPUT -s {{ mesh_v6_aggregate }} -p udp -m udp --dport 5000:5010 -j ACCEPT
--A INPUT -p udp -m udp --dport 5000:5010 -j DROP
--A INPUT -p tcp -m tcp --dport 161 -j DROP
--A INPUT -i lo -p tcp -m tcp --dport 80 -m comment --comment "status page: local health checks" -j ACCEPT
--A INPUT -i {{ intra_as_if }} -p tcp -m tcp --dport 80 -m comment --comment "status page: intra-as peers" -j ACCEPT
-{% for r in served_regions %}
--A INPUT -d {{ r.v6_host }} -p tcp -m tcp --dport 80 -m comment --comment "status page: public, mesh address {{ r.id }}" -j ACCEPT
-{% endfor %}
--A INPUT -p tcp -m tcp --dport 80 -m comment --comment "status page: not a listener" -j DROP
--A INPUT ! -s {{ mesh_v6_aggregate }} -p udp -m udp --dport 123 -m recent --set --name NTPTRAFFIC --mask ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff --rsource
--A INPUT ! -s {{ mesh_v6_aggregate }} -p udp -m udp --dport 123 -m recent --update --seconds 30 --hitcount 20 --name NTPTRAFFIC --mask ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff --rsource -j DROP
--A INPUT -p udp -m udp --dport 123 -j ACCEPT
--A INPUT -p tcp -m tcp --dport 9000:9999 -j DROP
--A FORWARD ! -s {{ mesh_v6_aggregate }} -o {{ uplink_if }} -j DROP
-{% for r in served_regions %}
--A FORWARD -s {{ r.v6_prefix }} -i {{ r.bat_if }} -o {{ uplink_if }} -j ACCEPT
-{% endfor %}
-{% for r in served_regions %}
--A FORWARD ! -s {{ r.v6_prefix }} -i {{ r.bat_if }} -o {{ uplink_if }} -j DROP
-{% endfor %}
--A FORWARD -o {{ uplink_if }} -p tcp -m tcp --tcp-flags SYN,RST SYN -m tcpmss ! --mss 0:1220 -j TCPMSS --set-mss 1220
-COMMIT
+# Client-facing exposure:
+# ssh mesh/intra-as (mesh aggregate) + operator prefixes only
+# dns/53 mesh clients only; kresd also REFUSEs them in its own ACL
+# dhcp6/547 link-local and mesh clients
+# ospf/89 link-local (uplink) and mesh (bat interfaces)
+# bgp/179 mesh peers only
+# vxlan intra-as segment only
+# respondd mesh clients only
+# http/80 region (mesh) addresses are announced upstream, so the status
+# page is deliberately reachable from the public internet on its
+# mesh IPv6 addresses, e.g. http://[2a03:2267:1::50]/; tcp/80 to
+# any other destination is dropped.
+# ntp/123 public, rate-limited per source
 
 *mangle
 :PREROUTING ACCEPT [0:0]
@@ -54,5 +27,136 @@ COMMIT
 :OUTPUT ACCEPT [0:0]
 :POSTROUTING ACCEPT [0:0]
 -A PREROUTING -i {{ uplink_if }} -j MARK --set-xmark 0x1/0xffffffff
--A PREROUTING -i bat-* -j MARK --set-xmark 0x1/0xffffffff
+-A PREROUTING -i bat-+ -j MARK --set-xmark 0x1/0xffffffff
+COMMIT
+
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+
+# --- fast path ---------------------------------------------------------
+-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# --- OSPFv3: uplink + bat interfaces -----------------------------------
+# Link-local multicast, non-stateful; admitted before the INVALID check so
+# multicast can never be classified INVALID. The uplink case is matched by
+# interface (the neighbour speaks from a link address, not the aggregate).
+-A INPUT -i {{ uplink_if }} -p ospf -j ACCEPT
+-A INPUT -s {{ mesh_v6_aggregate }} -p ospf -j ACCEPT
+-A INPUT -p ospf -j DROP
+
+-A INPUT -m conntrack --ctstate INVALID -j DROP
+-A INPUT -i lo -j ACCEPT
+
+# --- ICMPv6 ------------------------------------------------------------
+# ND/RS/RA/Redirect and MLD must always pass; PMTU and signalling too. Echo
+# request is rate-limited per source so the gateway is still pingable.
+-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 128 -m hashlimit --hashlimit-name fw-icmp6 --hashlimit-upto 5/second --hashlimit-burst 10 --hashlimit-mode srcip -j ACCEPT
+{% for t in [129, 130, 131, 132, 133, 134, 135, 136, 137, 1, 2, 3, 4] %}
+-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type {{ t }} -j ACCEPT
+{% endfor %}
+-A INPUT -p ipv6-icmp -j DROP
+
+# --- SSH: mesh, intra-as (inside the aggregate) and operator prefixes ---
+# Direct ACCEPT rules, not a returning chain: see the note in rules.v4.j2.
+{% for n in [mesh_v6_aggregate] + gw_ssh_allowlist6 %}
+-A INPUT -p tcp -m tcp --dport 22 -s {{ n }} -j ACCEPT
+{% endfor %}
+-A INPUT -p tcp -m tcp --dport 22 -m limit --limit 5/min -j LOG --log-prefix "{{ ffhh_host_name }} ssh-reject: " --log-level 4
+-A INPUT -p tcp -m tcp --dport 22 -j REJECT --reject-with icmp6-adm-prohibited
+
+# --- DHCPv6 server: link-local and mesh clients ------------------------
+-A INPUT -s fe80::/10 -p udp -m udp --dport 547 -j ACCEPT
+-A INPUT -s {{ mesh_v6_aggregate }} -p udp -m udp --dport 547 -j ACCEPT
+-A INPUT -p udp -m udp --dport 547 -j DROP
+
+# --- Client resolver (kresd): mesh clients only ------------------------
+{% for n in [mesh_v6_aggregate] + freifunk_v6_aggregates %}
+-A INPUT -s {{ n }} -p udp -m udp --dport 53 -j ACCEPT
+-A INPUT -s {{ n }} -p tcp -m tcp --dport 53 -j ACCEPT
+{% endfor %}
+-A INPUT -p udp -m udp --dport 53 -j DROP
+-A INPUT -p tcp -m tcp --dport 53 -j DROP
+
+# --- fastd tunnels: public, but not from the mesh aggregate ------------
+-A INPUT -s {{ mesh_v6_aggregate }} -p udp -m udp --dport 10000:10010 -j DROP
+-A INPUT -s 2001::/32 -p udp -m udp --dport 10000:10010 -m comment --comment "no fastd via teredo" -j DROP
+-A INPUT -s 2002::/16 -p udp -m udp --dport 10000:10010 -m comment --comment "no fastd via 6to4" -j DROP
+-A INPUT -p udp -m udp --dport 10000:10010 -j ACCEPT
+
+# --- VXLAN: intra-as segment only --------------------------------------
+-A INPUT -i {{ intra_as_if }} -p udp -m udp --dport 4789 -j ACCEPT
+-A INPUT -p udp -m udp --dport 4789 -j DROP
+
+# --- respondd: mesh clients only ---------------------------------------
+-A INPUT -s {{ mesh_v6_aggregate }} -p udp -m udp --dport 1001 -j ACCEPT
+-A INPUT -p udp -m udp --dport 1001 -j DROP
+
+# --- routing protocols -------------------------------------------------
+# BGP peers are gateway addresses inside the aggregate. OSPF is admitted
+# above, before the conntrack INVALID check.
+-A INPUT -s {{ mesh_v6_aggregate }} -p tcp -m tcp --dport 179 -j ACCEPT
+-A INPUT -p tcp -m tcp --dport 179 -j DROP
+
+# --- other service ports ----------------------------------------------
+-A INPUT -s {{ mesh_v6_aggregate }} -p udp -m udp --dport 5000:5010 -j ACCEPT
+-A INPUT -p udp -m udp --dport 5000:5010 -j DROP
+-A INPUT -p tcp -m tcp --dport 161 -j DROP
+
+# --- NTP: public, rate-limited per source ------------------------------
+-A INPUT -p udp -m udp --dport 123 -m hashlimit --hashlimit-name fw-ntp6 --hashlimit-upto 20/second --hashlimit-burst 40 --hashlimit-mode srcip -j ACCEPT
+-A INPUT -p udp -m udp --dport 123 -j DROP
+
+# --- status page -------------------------------------------------------
+-A INPUT -i lo -p tcp -m tcp --dport 80 -m comment --comment "status page: local health checks" -j ACCEPT
+-A INPUT -i {{ intra_as_if }} -p tcp -m tcp --dport 80 -m comment --comment "status page: intra-as peers" -j ACCEPT
+{% for r in served_regions %}
+-A INPUT -d {{ r.v6_host }} -p tcp -m tcp --dport 80 -m comment --comment "status page: public, mesh address {{ r.id }}" -j ACCEPT
+{% endfor %}
+-A INPUT -s {{ mesh_v6_aggregate }} -p tcp -m tcp --dport 80 -m comment --comment "status page: mesh clients" -j ACCEPT
+-A INPUT -p tcp -m tcp --dport 80 -m comment --comment "status page: not a listener" -j DROP
+
+# --- non-listening ports ----------------------------------------------
+-A INPUT -p tcp -m tcp --dport 9000:9999 -j DROP
+
+# --- anything else: visible, not silent -------------------------------
+-A INPUT -m limit --limit 5/min -j LOG --log-prefix "{{ ffhh_host_name }} input-drop: " --log-level 4
+
+# --- forwarding: deliberately stateless -------------------------------
+# Client IPv6 traffic is not NATed, so a flow can leave through one gateway
+# and return through another. Conntrack state therefore cannot be trusted for
+# forwarding: an ESTABLISHED fast path would not match the return packets on
+# the gateway that did not see the outbound direction, and an
+# `--ctstate INVALID` drop actively discards them. FORWARD is decided purely
+# by interface and source address.
+#
+# Note the interface wildcard is `bat-+`, not `bat-*`: iptables only treats a
+# trailing '+' as a prefix match, so `bat-*` matches no interface at all.
+# Clamp before ACCEPT: TCPMSS is non-terminating, ACCEPT would skip it.
+-A FORWARD -o {{ uplink_if }} -p tcp -m tcp --tcp-flags SYN,RST SYN -m tcpmss ! --mss 0:1220 -j TCPMSS --set-mss 1220
+# Only mesh sources may egress to the uplink (anti-spoofing).
+-A FORWARD ! -s {{ mesh_v6_aggregate }} -o {{ uplink_if }} -j DROP
+# clients -> internet
+-A FORWARD -i bat-+ -s {{ mesh_v6_aggregate }} -o {{ uplink_if }} -j ACCEPT
+# internet -> clients (clients hold globally routable addresses; upstream
+# controls reachability)
+-A FORWARD -i {{ uplink_if }} -o bat-+ -j ACCEPT
+# mesh-internal: clients to mesh services (NTP etc.), including cross-region
+-A FORWARD -i bat-+ -s {{ mesh_v6_aggregate }} -o bat-+ -j ACCEPT
+# mesh <-> intra-as (VXLAN peers)
+-A FORWARD -i bat-+ -s {{ mesh_v6_aggregate }} -o {{ intra_as_if }} -j ACCEPT
+-A FORWARD -i {{ intra_as_if }} -o bat-+ -j ACCEPT
+-A FORWARD -m limit --limit 5/min -j LOG --log-prefix "{{ ffhh_host_name }} forward-drop: " --log-level 4
+COMMIT
+
+*raw
+:PREROUTING ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+-A PREROUTING -i {{ intra_as_if }} -p udp -m udp --dport 10000:10010 -j NOTRACK
+-A PREROUTING -i {{ intra_as_if }} -p udp -m udp --dport 4789 -j NOTRACK
+-A PREROUTING -i {{ uplink_if }} -p udp -m udp --dport 4789 -j NOTRACK
+-A OUTPUT -o {{ intra_as_if }} -p udp -m udp --sport 10000:10010 -j NOTRACK
+-A OUTPUT -o {{ intra_as_if }} -p udp -m udp --dport 4789 -j NOTRACK
+-A OUTPUT -o {{ uplink_if }} -p udp -m udp --dport 4789 -j NOTRACK
 COMMIT

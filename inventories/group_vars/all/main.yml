@@ -34,6 +34,15 @@ mesh_mtu: 1312
 mesh_v4_aggregate: "10.112.0.0/16"
 mesh_v6_aggregate: "2a03:2267::/32"
 
+# Aggregates of other Freifunk communities whose clients can reach this
+# gateway through a fastd peer. They are the source ranges of the BIRD
+# import (is_freifunk6), and the resolver ACL and firewall treat them as
+# mesh clients.
+freifunk_v6_aggregates:
+  - "2001:0bf7::/32"
+  - "2a03:2260::/29"
+  - "2001:67c:2d50::/48"
+
 # Forwarded service /32s published on every gateway: destination, mesh hop
 # and label. These are static natips routes in BIRD and are also reflected in
 # the firewall rules; the mesh hop is the address of the host the service
@@ -107,15 +116,20 @@ knot_upstream_ffhh: "2a00:14b0:4200:3380:134::1"
 
 unbound_conf: /etc/unbound/unbound.conf
 unbound_conf_dir: /etc/unbound/unbound.conf.d
+# Client-facing resolver ACL, shared by both backends: mesh clients only.
+# The gateway answers recursion for the mesh (region subnets, the intra-as
+# segment and Freifunk peers' clients) and for its own loopback checks;
+# every other source is REFUSED.  The firewall enforces the same split on
+# the wire (tcp/53 and udp/53 are mesh-only in rules.v4/v6).
 unbound_access_control:
   - { net: "0.0.0.0/0", action: refuse }
   - { net: "127.0.0.0/8", action: allow }
   - { net: "::0/0", action: refuse }
   - { net: "::1", action: allow }
   - { net: "::ffff:127.0.0.1", action: allow }
-  - { net: "10.0.0.0/8", action: allow }
-  - { net: "172.16.0.0/12", action: allow }
-  - { net: "fc00::/7", action: allow }
+  # CIDR literals, not references: the templates read a.net directly and do
+  # not re-template a variable that itself contains Jinja.
+  - { net: "10.112.0.0/16", action: allow }
   - { net: "2a03:2267::/32", action: allow }
   - { net: "fe80::/10", action: allow }
   - { net: "2001:0bf7::/32", action: allow }

@@ -6,7 +6,11 @@
     ACL (unbound access-control allow/refuse)
       -> one policy rule that inspects req.qsource.addr and REFUSEs anything
          not in the allow list. It is added first so no zone rule runs for an
-         unauthorised client.
+         unauthorised client. The allow list is mesh clients only (region
+         subnets, the intra-as segment that sits inside the mesh aggregate,
+         and Freifunk peers' clients); the listener therefore answers
+         recursion for the mesh and for nothing else. The firewall enforces
+         the same split on the wire.
 
     node/knoten/router + NTP names (local-zone redirect + access-control tags)
       -> per-region authoritative answers, limited to the region subnets.
@@ -42,7 +46,10 @@ modules = { 'hints > iterate', 'stats', 'view' }
 cache.storage = '{{ knot_cache_dir }}'
 cache.size = {{ knot_cache_mb }} * MB
 
--- ---------- ACL ---------------------------------------------------------
+-- ---------- ACL: mesh clients only -------------------------------------
+-- Sources outside the allow list get REFUSED, not an empty answer: the
+-- gateway is not an open resolver, and the ruleset drops tcp/53 and udp/53
+-- from non-mesh sources before they reach here.
 local function subnet_match(addr, subnet)
     local cd = ffi.new('char[16]')
     local family = ffi.C.kr_straddr_family(subnet)

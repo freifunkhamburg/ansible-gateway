@@ -16,6 +16,14 @@
 :FORWARD ACCEPT [0:0]
 :OUTPUT ACCEPT [0:0]
 :POSTROUTING ACCEPT [0:0]
+# These marks are NOT dead weight, unlike the v6 pair: fwmark_reflect
+# (base sysctls) mirrors the mark onto reply packets, and the ip rule
+# `32000 fwmark 0x1 lookup mesh` then pins OUTPUT replies of
+# uplink-originated INPUT connections (ssh from the operator net!) to the
+# mesh table with its BGP default on the correct device. OUTPUT has no
+# iif, so the 31000 iif rules cannot express that; deleting these rules
+# would send uplink replies out via the intra-as default — asymmetric
+# routing, potentially uRPF-dropped upstream. Audited 2026-11: keep.
 -A PREROUTING -i {{ uplink_if }} -j MARK --set-xmark 0x1/0xffffffff
 -A PREROUTING -i bat-+ -j MARK --set-xmark 0x1/0xffffffff
 COMMIT
@@ -97,9 +105,12 @@ COMMIT
 -A INPUT -s {{ mesh_v4_aggregate }} -p udp -m udp --dport 1001 -j ACCEPT
 -A INPUT -p udp -m udp --dport 1001 -j DROP
 
-# --- NTP: public, rate-limited per source ------------------------------
-# Aggregate ceiling behind the per-source bucket (see the ICMP note).
--A INPUT -p udp -m udp --dport 123 -m hashlimit --hashlimit-name fw-ntp --hashlimit-upto 20/second --hashlimit-burst 40 --hashlimit-mode srcip -j ACCEPT
+# --- NTP: mesh and intra-as only, rate-limited per source --------------
+# Clients (option 42) and AS peers are the only advertised consumers;
+# uplink gets nothing. Aggregate ceiling behind the per-source bucket
+# (see the ICMP note).
+-A INPUT -i bat-+ -p udp -m udp --dport 123 -m hashlimit --hashlimit-name fw-ntp --hashlimit-upto 20/second --hashlimit-burst 40 --hashlimit-mode srcip -j ACCEPT
+-A INPUT -i {{ intra_as_if }} -p udp -m udp --dport 123 -j ACCEPT
 -A INPUT -p udp -m udp --dport 123 -m hashlimit --hashlimit-name fw-ntp-agg4 --hashlimit-above 500/second --hashlimit-burst 1000 --hashlimit-mode dstip -j DROP
 -A INPUT -p udp -m udp --dport 123 -j DROP
 

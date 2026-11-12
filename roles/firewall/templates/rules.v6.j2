@@ -19,7 +19,7 @@
 # page is deliberately reachable from the public internet on its
 # mesh IPv6 addresses, e.g. http://[2a03:2267:1::50]/; tcp/80 to
 # any other destination is dropped.
-# ntp/123 public, rate-limited per source
+# ntp/123 mesh and intra-as only, rate-limited per source
 
 *mangle
 :PREROUTING ACCEPT [0:0]
@@ -27,8 +27,9 @@
 :FORWARD ACCEPT [0:0]
 :OUTPUT ACCEPT [0:0]
 :POSTROUTING ACCEPT [0:0]
--A PREROUTING -i {{ uplink_if }} -j MARK --set-xmark 0x1/0xffffffff
--A PREROUTING -i bat-+ -j MARK --set-xmark 0x1/0xffffffff
+# No marks here on purpose: unlike IPv4 there is no `fwmark 0x1` ip-rule in
+# v6 to consume one, so marking forwarded packets was pure overhead
+# (measured: 54.7 M marked packets / 4 days for nothing).
 COMMIT
 
 *filter
@@ -104,9 +105,12 @@ COMMIT
 -A INPUT -p udp -m udp --dport 5000:5010 -j DROP
 -A INPUT -p tcp -m tcp --dport 161 -j DROP
 
-# --- NTP: public, rate-limited per source ------------------------------
-# Aggregate ceiling behind the per-source bucket (see the ICMPv6 note).
--A INPUT -p udp -m udp --dport 123 -m hashlimit --hashlimit-name fw-ntp6 --hashlimit-upto 20/second --hashlimit-burst 40 --hashlimit-mode srcip -j ACCEPT
+# --- NTP: mesh and intra-as only, rate-limited per source --------------
+# No upstream advertises this gateway as a v6 NTP source, so the public
+# internet gets nothing here. Aggregate ceiling behind the per-source
+# bucket (see the ICMPv6 note).
+-A INPUT -i bat-+ -p udp -m udp --dport 123 -m hashlimit --hashlimit-name fw-ntp6 --hashlimit-upto 20/second --hashlimit-burst 40 --hashlimit-mode srcip -j ACCEPT
+-A INPUT -i {{ intra_as_if }} -p udp -m udp --dport 123 -j ACCEPT
 -A INPUT -p udp -m udp --dport 123 -m hashlimit --hashlimit-name fw-ntp6-agg --hashlimit-above 500/second --hashlimit-burst 1000 --hashlimit-mode dstip -j DROP
 -A INPUT -p udp -m udp --dport 123 -j DROP
 

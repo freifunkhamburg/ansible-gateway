@@ -2,9 +2,11 @@
 #
 # Default-deny: INPUT and FORWARD start at DROP and every listener is named
 # explicitly. Established flows are accepted by conntrack before the per-port
-# rules. The raw table now NOTRACKs only the tunnel/VXLAN data plane (it used
-# to NOTRACK everything, which made a default-deny policy impossible because
-# no flow could ever be seen as ESTABLISHED).
+# rules. The raw table untracks the *forwarded* client data plane (FORWARD
+# below is stateless for asymmetric routing, so state would be allocated and
+# never consulted); traffic destined for this host stays tracked for the
+# INPUT fast path. The tunnel/VXLAN data plane is IPv4-transported and never
+# reaches these v6 tables.
 #
 # Client-facing exposure:
 # ssh mesh/intra-as (mesh aggregate) + operator prefixes only
@@ -12,7 +14,6 @@
 # dhcp6/547 link-local and mesh clients
 # ospf/89 link-local (uplink) and mesh (bat interfaces)
 # bgp/179 mesh peers only
-# vxlan intra-as segment only
 # respondd mesh clients only
 # http/80 region (mesh) addresses are announced upstream, so the status
 # page is deliberately reachable from the public internet on its
@@ -40,9 +41,11 @@ COMMIT
 
 # --- OSPFv3: uplink + bat interfaces -----------------------------------
 # Link-local multicast, non-stateful; admitted before the INVALID check so
-# multicast can never be classified INVALID. The uplink case is matched by
-# interface (the neighbour speaks from a link address, not the aggregate).
--A INPUT -i {{ uplink_if }} -p ospf -j ACCEPT
+# multicast can never be classified INVALID. OSPF carries no
+# authentication, so the uplink accept is pinned: OSPFv3 speaks from the
+# link-local address (RFC 5187), which bounds the offer to the transit
+# segment itself.
+-A INPUT -i {{ uplink_if }} -s fe80::/10 -p ospf -j ACCEPT
 -A INPUT -s {{ mesh_v6_aggregate }} -p ospf -j ACCEPT
 -A INPUT -p ospf -j DROP
 
@@ -51,8 +54,11 @@ COMMIT
 
 # --- ICMPv6 ------------------------------------------------------------
 # ND/RS/RA/Redirect and MLD must always pass; PMTU and signalling too. Echo
-# request is rate-limited per source so the gateway is still pingable.
+# request is rate-limited per source so the gateway is still pingable; the
+# aggregate bucket behind it bounds the work under a flood with spoofed
+# sources (v6 sources are trivially forged, no per-source limit sees it).
 -A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 128 -m hashlimit --hashlimit-name fw-icmp6 --hashlimit-upto 5/second --hashlimit-burst 10 --hashlimit-mode srcip -j ACCEPT
+-A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type 128 -m hashlimit --hashlimit-name fw-icmp6-agg --hashlimit-above 1000/second --hashlimit-burst 2000 --hashlimit-mode dstip -j DROP
 {% for t in [129, 130, 131, 132, 133, 134, 135, 136, 137, 1, 2, 3, 4] %}
 -A INPUT -p ipv6-icmp -m icmp6 --icmpv6-type {{ t }} -j ACCEPT
 {% endfor %}
@@ -79,15 +85,9 @@ COMMIT
 -A INPUT -p udp -m udp --dport 53 -j DROP
 -A INPUT -p tcp -m tcp --dport 53 -j DROP
 
-# --- fastd tunnels: public, but not from the mesh aggregate ------------
--A INPUT -s {{ mesh_v6_aggregate }} -p udp -m udp --dport 10000:10010 -j DROP
--A INPUT -s 2001::/32 -p udp -m udp --dport 10000:10010 -m comment --comment "no fastd via teredo" -j DROP
--A INPUT -s 2002::/16 -p udp -m udp --dport 10000:10010 -m comment --comment "no fastd via 6to4" -j DROP
--A INPUT -p udp -m udp --dport 10000:10010 -j ACCEPT
-
 # --- VXLAN: intra-as segment only --------------------------------------
--A INPUT -i {{ intra_as_if }} -p udp -m udp --dport 4789 -j ACCEPT
--A INPUT -p udp -m udp --dport 4789 -j DROP
+# (removed: the VXLAN devices are IPv4-transported, this family never sees
+# their packets; the v4 ruleset carries the policy)
 
 # --- respondd: mesh clients only ---------------------------------------
 -A INPUT -s {{ mesh_v6_aggregate }} -p udp -m udp --dport 1001 -j ACCEPT
@@ -105,10 +105,18 @@ COMMIT
 -A INPUT -p tcp -m tcp --dport 161 -j DROP
 
 # --- NTP: public, rate-limited per source ------------------------------
+# Aggregate ceiling behind the per-source bucket (see the ICMPv6 note).
 -A INPUT -p udp -m udp --dport 123 -m hashlimit --hashlimit-name fw-ntp6 --hashlimit-upto 20/second --hashlimit-burst 40 --hashlimit-mode srcip -j ACCEPT
+-A INPUT -p udp -m udp --dport 123 -m hashlimit --hashlimit-name fw-ntp6-agg --hashlimit-above 500/second --hashlimit-burst 1000 --hashlimit-mode dstip -j DROP
 -A INPUT -p udp -m udp --dport 123 -j DROP
 
 # --- status page -------------------------------------------------------
+# Guards first: drop only what is *over* the SYN token bucket respectively
+# over the per-source connection count; everything else falls through to the
+# accept/drop decisions below. These addresses are announced to the public
+# internet, so the listener carries its own budget.
+-A INPUT -p tcp -m tcp --dport 80 -m tcp --tcp-flags SYN,RST SYN -m hashlimit --hashlimit-name fw-http-syn6 --hashlimit-above 50/second --hashlimit-burst 100 --hashlimit-mode srcip -j DROP
+-A INPUT -p tcp -m tcp --dport 80 -m connlimit --connlimit-above 50 -j DROP
 -A INPUT -i lo -p tcp -m tcp --dport 80 -m comment --comment "status page: local health checks" -j ACCEPT
 -A INPUT -i {{ intra_as_if }} -p tcp -m tcp --dport 80 -m comment --comment "status page: intra-as peers" -j ACCEPT
 {% for r in served_regions %}
@@ -133,15 +141,32 @@ COMMIT
 #
 # Note the interface wildcard is `bat-+`, not `bat-*`: iptables only treats a
 # trailing '+' as a prefix match, so `bat-*` matches no interface at all.
-# Clamp before ACCEPT: TCPMSS is non-terminating, ACCEPT would skip it.
--A FORWARD -o {{ uplink_if }} -p tcp -m tcp --tcp-flags SYN,RST SYN -m tcpmss ! --mss 0:1220 -j TCPMSS --set-mss 1220
+#
+# MSS clamps first and pair-agnostic (measured: this gateway forwards far
+# more v6 handshakes toward clients — SYN-ACK — than toward the internet,
+# because outbound flows often leave through another gateway; a clamp bound
+# to `-o uplink` would sit idle while downloads and the uploads bounded by
+# the server's SYN-ACK run oversized for the 1312-byte mesh path). The SYN
+# clamp bounds server->client data, the SYN-ACK clamp bounds client->server
+# data; PMTU discovery cannot serve as the bound here because its Packet-
+# Too-Big answers would have to travel the reverse of an independently
+# chosen return path. The flag masks are exact (SYN,ACK,RST SYN and SYN,ACK
+# SYN,ACK) so the SYN rule cannot absorb SYN-ACK packets before the second
+# rule sees them. Clamps precede every ACCEPT: TCPMSS is
+# non-terminating and an ACCEPT ends the traversal.
+-A FORWARD -p tcp -m tcp --tcp-flags SYN,ACK,RST SYN -m tcpmss ! --mss 0:1220 -j TCPMSS --set-mss 1220
+-A FORWARD -p tcp -m tcp --tcp-flags SYN,ACK SYN,ACK -m tcpmss ! --mss 0:1220 -j TCPMSS --set-mss 1220
+# Order of the accepts follows the measured traffic mix: internet->clients
+# is by far the largest class and hits its ACCEPT first; the anti-spoof DROP
+# only concerns `-o uplink`, so passing the uplink->client rule above it
+# cannot change an outcome.
+# internet -> clients (clients hold globally routable addresses; upstream
+# controls reachability)
+-A FORWARD -i {{ uplink_if }} -o bat-+ -j ACCEPT
 # Only mesh sources may egress to the uplink (anti-spoofing).
 -A FORWARD ! -s {{ mesh_v6_aggregate }} -o {{ uplink_if }} -j DROP
 # clients -> internet
 -A FORWARD -i bat-+ -s {{ mesh_v6_aggregate }} -o {{ uplink_if }} -j ACCEPT
-# internet -> clients (clients hold globally routable addresses; upstream
-# controls reachability)
--A FORWARD -i {{ uplink_if }} -o bat-+ -j ACCEPT
 # mesh-internal: clients to mesh services (NTP etc.), including cross-region
 -A FORWARD -i bat-+ -s {{ mesh_v6_aggregate }} -o bat-+ -j ACCEPT
 # mesh <-> intra-as (VXLAN peers)
@@ -153,10 +178,18 @@ COMMIT
 *raw
 :PREROUTING ACCEPT [0:0]
 :OUTPUT ACCEPT [0:0]
--A PREROUTING -i {{ intra_as_if }} -p udp -m udp --dport 10000:10010 -j NOTRACK
--A PREROUTING -i {{ intra_as_if }} -p udp -m udp --dport 4789 -j NOTRACK
--A PREROUTING -i {{ uplink_if }} -p udp -m udp --dport 4789 -j NOTRACK
--A OUTPUT -o {{ intra_as_if }} -p udp -m udp --sport 10000:10010 -j NOTRACK
--A OUTPUT -o {{ intra_as_if }} -p udp -m udp --dport 4789 -j NOTRACK
--A OUTPUT -o {{ uplink_if }} -p udp -m udp --dport 4789 -j NOTRACK
+:ffhh-ct6 - [0:0]
+# The forwarded client data plane is untracked outright: FORWARD above is
+# stateless (asymmetric routing), so an entry for these flows would be
+# allocated, timed out and never consulted. The interface cannot be matched
+# on the *output* side in PREROUTING, so the split from INPUT is done by
+# destination instead: packets for this host (addrtype LOCAL) and multicast
+# (not every kernel classifies it LOCAL, and ND/OSPFv3/respondd rely on
+# conntrack-visible INPUT) return to PREROUTING and stay tracked as before.
+-A PREROUTING -i {{ uplink_if }} -j ffhh-ct6
+-A PREROUTING -i bat-+ -j ffhh-ct6
+-A PREROUTING -i {{ intra_as_if }} -j ffhh-ct6
+-A ffhh-ct6 -d ff00::/8 -j RETURN
+-A ffhh-ct6 -m addrtype --dst-type LOCAL -j RETURN
+-A ffhh-ct6 -j NOTRACK
 COMMIT

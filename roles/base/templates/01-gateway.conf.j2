@@ -39,3 +39,13 @@ net.ipv4.udp_rmem_min=16384
 net.ipv4.udp_wmem_min=16384
 net.ipv4.fwmark_reflect=1
 net.ipv6.fwmark_reflect=1
+# A forwarding router must neither send nor act on ICMP redirects (RFC 4861
+# §6.2.7 restricts sending to first-hop routers, §6.3.2 says routers never
+# accept them). Sent redirects advertise topology to clients for no benefit
+# here; accepted ones would let any transit host steer this stack's routes.
+# The kernel combines `all` with the per-interface value, so the base role
+# also zeroes the interfaces that exist at apply time.
+net.ipv4.conf.all.send_redirects=0
+net.ipv4.conf.default.send_redirects=0
+net.ipv6.conf.all.accept_redirects=0
+net.ipv6.conf.default.accept_redirects=0

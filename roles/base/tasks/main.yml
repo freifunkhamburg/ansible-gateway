@@ -29,6 +29,25 @@
   changed_when: false
   failed_when: false
 
+# `all.*` is combined with the per-interface value and interfaces created
+# before this drop-in existed keep their inherited 1; default.* only covers
+# interfaces created later. Zero the live ones so the redirect settings are
+# effective without a reboot.
+- name: Disable ICMP redirects on every interface that exists now
+  ansible.builtin.shell: |
+    set -eu
+    changed=0
+    for f in /proc/sys/net/ipv4/conf/*/send_redirects \
+             /proc/sys/net/ipv6/conf/*/accept_redirects; do
+      if [ "$(cat "$f")" != 0 ]; then
+        echo 0 > "$f"
+        changed=1
+      fi
+    done
+    echo "changed=$changed"
+  register: redirect_zero
+  changed_when: "'changed=1' in redirect_zero.stdout"
+
 # --- log retention -----------------------------------------------------
 - name: Ensure the journald drop-in directory exists
   ansible.builtin.file:

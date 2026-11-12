@@ -36,6 +36,20 @@
 
         "valid-lifetime": {{ kea_valid_lifetime }},
 
+        {# RFC 2132 option 26: a mesh client's real path MTU is mesh_mtu,
+           because every route out crosses its own fastd tunnel. A client
+           that sizes its interface to the 1500 of the batman bridge sends
+           segments the tunnel drops silently — the classic stalled upload.
+           Server-level so Kea inherits it into every subnet: the value is a
+           mesh-wide constant, not per-region. DHCPv6 defines no equivalent
+           option; v6 is bounded by the FORWARD MSS clamps instead. #}
+        "option-data": [
+            {
+                "name": "interface-mtu",
+                "data": "{{ mesh_mtu }}"
+            }
+        ],
+
         "subnet4": [
 {% for s in kea_subnet4 %}
             {
